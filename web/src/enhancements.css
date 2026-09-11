@@ -10,14 +10,16 @@
 
 /* Keep the final conversation turn visibly separate from the fixed composer. */
 .content {
-  padding-bottom: 208px;
-  scroll-padding-bottom: 208px;
+  padding-bottom: 156px;
+  scroll-padding-bottom: 156px;
 }
 
 .conversation-turn {
   display: grid;
-  gap: 16px;
-  margin-top: 18px;
+  gap: 10px;
+  margin-top: 12px;
+  font-size: 14px;
+  line-height: 1.55;
 }
 
 .relationship-panel { margin: 16px 0; }
@@ -37,13 +39,17 @@
 .relationship-list em.rejected { color: var(--danger); }
 
 .conversation-turn + .conversation-turn {
-  margin-top: 30px;
-  padding-top: 28px;
+  margin-top: 16px;
+  padding-top: 14px;
   border-top: 1px solid var(--border);
 }
 
 .conversation-turn > .user-message {
   margin: 0 0 0 auto;
+  max-width: min(900px, 92%);
+  padding: 7px 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .conversation-turn > .progress-panel,
@@ -59,12 +65,24 @@
 }
 
 .assistant-message {
-  max-width: 860px;
-  padding: 12px 14px;
-  border-left: 3px solid var(--accent);
+  max-width: 100%;
+  padding: 8px 12px;
+  border-left: 2px solid var(--accent);
   background: #fff;
-  line-height: 1.7;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
+
+.assistant-messages:empty { display: none; }
+.conversation-turn .notice-panel,
+.conversation-turn .clarify-panel { padding: 12px 14px; }
+.conversation-turn .notice-panel h2,
+.conversation-turn .clarify-panel h2 { font-size: 15px; }
+.composer { padding-top: 8px; padding-bottom: 10px; }
+.composer textarea { min-height: 40px; height: 40px; padding: 8px 12px 4px; font-size: 14px; line-height: 1.5; }
+.composer textarea:focus { height: 64px; }
+.composer-actions { height: 36px; padding-bottom: 4px; }
 
 .history-pagination .icon-button {
   border: 1px solid var(--border);

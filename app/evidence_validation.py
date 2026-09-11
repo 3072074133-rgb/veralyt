@@ -95,7 +95,7 @@ def evidence_row_count_supports(
     if parsed is None or parsed != parsed.to_integral_value() or parsed < 0:
         return False
     count_phrase = re.compile(
-        rf"(?:共|合计|包含)?\s*{re.escape(token)}\s*(?:行|条|个(?:部门|类别|项目|结果))"
+        rf"(?:共|合计|包含)?\s*{re.escape(token)}\s*(?:行|条|个(?:部门|类别|项目|结果|分组))"
     )
     if not count_phrase.search(text):
         return False
@@ -124,7 +124,7 @@ def numeric_tokens(text: str, *, ignored_terms: set[str] | None = None) -> list[
     # Spreadsheet-generated field names commonly contain identifiers such as
     # "未命名列3". Their suffix is metadata, not a numeric business claim.
     for term in sorted(ignored_terms or (), key=len, reverse=True):
-        if term and any(character.isdigit() for character in term):
+        if term and any(character.isdigit() for character in term) and not re.fullmatch(r'[\d,.%+-]+', term):
             claim_text = claim_text.replace(term, "")
     claim_text = re.sub(r"(?<!\d)\d{4}[-/]\d{1,2}(?:[-/]\d{1,2})?(?!\d)", "", claim_text)
     claim_text = re.sub(r"\d{4}年", "", claim_text)

@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 def utc_now() -> str:
@@ -298,10 +298,46 @@ class DatasetCorrectionResult(StrictModel):
 
 
 class IntentDecision(StrictModel):
-    is_analysis: bool
-    reason: str
-    confidence: float = Field(ge=0, le=1)
-    suggested_response: str | None = None
+    route: Literal['analysis', 'derived_metric', 'clarification', 'conversation', 'explanation']
+    reason: str = ''
+    reply: str | None = None
+    metric: str | None = None
+
+    @model_validator(mode='before')
+    @classmethod
+    def read_legacy(cls, value):
+        if not isinstance(value, dict):
+            return value
+        value = dict(value)
+        legacy = value.pop('is_analysis', None)
+        value.pop('confidence', None)
+        if 'suggested_response' in value:
+            value.setdefault('reply', value.pop('suggested_response'))
+        if 'route' not in value and isinstance(legacy, bool):
+            value['route'] = 'analysis' if legacy else 'conversation'
+        if value.get('route') == 'off_topic':
+            value['route'] = 'conversation'
+        if legacy is False and value.get('route') == 'conversation' and not value.get('reply'):
+            value['reply'] = '请告诉我你想了解的问题。'
+        if isinstance(legacy, bool) and legacy != (value.get('route') != 'conversation'):
+            raise ValueError('conflicting legacy intent and route')
+        return value
+
+    @property
+    def is_analysis(self) -> bool:
+        return self.route != 'conversation'
+
+    @property
+    def suggested_response(self) -> str | None:
+        return self.reply
+
+    @model_validator(mode='after')
+    def validate_route_fields(self):
+        if self.route == 'derived_metric' and not self.metric:
+            raise ValueError('derived_metric requires metric')
+        if self.route == 'conversation' and not (self.reply or '').strip():
+            raise ValueError('conversation requires a nonempty reply answering the user')
+        return self
 
 
 class PlanStep(StrictModel):
@@ -309,7 +345,7 @@ class PlanStep(StrictModel):
     purpose: str
     tool: Literal["auto_analyze", "profile_table", "query_data"]
     dataset_id: str | None = None
-    dataset_ids: list[str] = Field(default_factory=list, max_length=4)
+    dataset_ids: list[str] = Field(default_factory=list, max_length=6)
     joins: list["QueryJoin"] = Field(default_factory=list, max_length=3)
 
 

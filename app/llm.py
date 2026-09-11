@@ -90,13 +90,15 @@ class OllamaGateway:
         last_error: Exception | None = None
         for attempt in range(2):
             if attempt:
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": f"上一次输出未通过 JSON Schema 校验：{last_error}。只返回符合 Schema 的 JSON，不要解释。",
-                    }
-                )
-            input_tokens = _estimate_tokens(prompt + "".join(message["content"] for message in messages[1:]))
+                if isinstance(last_error, ValidationError):
+                    detail = '; '.join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in last_error.errors()[:4])
+                else:
+                    detail = 'invalid JSON'
+                repair = f'\n上次输出校验失败：{detail[:240]}。只返回符合 Schema 的 JSON。'
+                selection = _select_context(prompt_name, prompt + repair, [context, *(fallback_contexts or [])])
+                messages = [{'role': 'system', 'content': prompt + repair},
+                            {'role': 'user', 'content': selection.serialized_context}]
+            input_tokens = _estimate_tokens(''.join(message['content'] for message in messages))
             _ensure_input_budget(input_tokens, selection.budget)
             started_at = time.perf_counter()
             try:
@@ -120,7 +122,19 @@ class OllamaGateway:
                         selection=selection,
                     ),
                 )
-                payload = json.loads(response.message.content)
+                content = response.message.content.strip()
+                if content.startswith('```') and content.endswith('```'):
+                    content = re.sub(r'^```(?:json)?\s*|\s*```$', '', content)
+                payload = json.loads(content)
+                wrapper_names = {response_model.__name__, re.sub(r'(?<!^)(?=[A-Z])', '_', response_model.__name__).lower()}
+                if isinstance(payload, dict) and len(payload) == 1 and next(iter(payload)) in wrapper_names:
+                    wrapped = next(iter(payload.values()))
+                    if isinstance(wrapped, dict):
+                        payload = wrapped
+                    elif response_model.__name__ == 'IntentDecision' and wrapped in ('分析', '非分析'):
+                        payload = {'is_analysis': wrapped == '分析', 'confidence': 0,
+                                   'reason': '模型仅返回粗粒度类别，需要确认当前需求',
+                                   'route': 'clarification' if wrapped == '分析' else 'off_topic'}
                 for field in ignored_response_fields:
                     payload.pop(field, None)
                 parsed = response_model.model_validate(payload)

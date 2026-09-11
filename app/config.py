@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     region_blank_column_gap: int = 1
     max_query_rows: int = 5000
     max_tool_calls: int = 10
+    followup_enabled: bool = True
+    model_intent_enabled: bool = True
     max_revision_rounds: int = 3
     query_timeout_seconds: int = 30
     model_context_tokens: int = 16384

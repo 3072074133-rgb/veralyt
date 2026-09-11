@@ -7,6 +7,7 @@ import re
 import time
 import uuid
 import zipfile
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -17,7 +18,7 @@ import duckdb
 import polars as pl
 from charset_normalizer import from_bytes
 from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import get_column_letter, range_boundaries
 
 from .config import settings
 from .models import DatasetColumn, DatasetInfo, DatasetRegion, UploadedFile
@@ -264,6 +265,7 @@ def _rename_reserved_row_id(frame: pl.DataFrame) -> pl.DataFrame:
 
 
 def _read_xlsx(path: Path) -> WorkbookReadResult:
+    table_ranges = _native_table_ranges(path)
     workbook = load_workbook(path, read_only=True, data_only=True)
     detected_sheet_count = len(workbook.sheetnames)
     if detected_sheet_count > settings.max_sheets:
@@ -280,7 +282,7 @@ def _read_xlsx(path: Path) -> WorkbookReadResult:
             if worksheet.sheet_state != "visible":
                 skipped_sheet_count += 1
                 continue
-            sheet_regions = _read_sheet_regions(worksheet, budget)
+            sheet_regions = _read_sheet_regions(worksheet, budget, table_ranges.get(worksheet.title, []))
             if not sheet_regions:
                 skipped_sheet_count += 1
                 continue
@@ -318,8 +320,38 @@ def _read_xlsx(path: Path) -> WorkbookReadResult:
 SparseRow = tuple[int, dict[int, Any]]
 
 
+def _native_table_ranges(path: Path) -> dict[str, list[str]]:
+    """Read table metadata without loading a second, non-streaming workbook."""
+    import posixpath
+    ns = {'s': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+    rid = '{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id'
+    with zipfile.ZipFile(path) as archive:
+        def relations(part: str) -> dict[str, str]:
+            directory, name = posixpath.split(part)
+            rel = f'{directory}/_rels/{name}.rels'
+            if rel not in archive.namelist():
+                return {}
+            return {r.attrib['Id']: posixpath.normpath(posixpath.join(directory, r.attrib['Target']))
+                    if not r.attrib['Target'].startswith('/') else r.attrib['Target'].lstrip('/')
+                    for r in ET.fromstring(archive.read(rel)) if r.attrib.get('TargetMode') != 'External'}
+        book_rels = relations('xl/workbook.xml')
+        result = {}
+        for sheet in ET.fromstring(archive.read('xl/workbook.xml')).findall('s:sheets/s:sheet', ns):
+            part = book_rels[sheet.attrib[rid]]
+            sheet_rels = relations(part)
+            refs = []
+            for target in sheet_rels.values():
+                if not target.startswith('xl/tables/'):
+                    continue
+                metadata = ET.fromstring(archive.read(target))
+                if metadata.attrib.get('headerRowCount', '1') != '0':
+                    refs.append(metadata.attrib['ref'])
+            result[sheet.attrib['name']] = refs
+        return result
+
+
 def _read_sheet_regions(
-    worksheet: Any, budget: IngestionBudget | None = None
+    worksheet: Any, budget: IngestionBudget | None = None, table_ranges: list[str] | None = None
 ) -> list[ParsedRegion]:
     """Read one worksheet as sparse rows and split it into independent tables."""
     budget = budget or IngestionBudget()
@@ -364,6 +396,31 @@ def _read_sheet_regions(
     if current_band:
         vertical_bands.append(current_band)
 
+    # Financial statement sections share one header across blank separator rows.
+    financial_names = {'利润表', '资产负债表', '现金流量表', '费用明细', '应收账款', '应付账款'}
+    if worksheet.title in financial_names:
+        rows = [row for band in vertical_bands for row in band]
+        header = next((range_boundaries(ref)[1] for ref in table_ranges or []), None)
+        header = header or next((r for r, v in rows if len(v) >= 3 and
+                       any(x in v.values() for x in ('本月金额', '月末余额', '本月发生额')) and
+                       any(x in v.values() for x in ('项目', '费用项目', '客户名称', '供应商名称'))), None)
+        if header is None:
+            raise IngestionError(f'工作表“{worksheet.title}”未识别到可靠财务表头，请检查项目及金额列',
+                                 code='financial_header_invalid')
+        rows = [(r, v) for r, v in rows if r >= header]
+        width = max(rows[0][1])
+        region = _build_region(sheet_name=worksheet.title, region_index=1, rows=rows,
+                               start_column=1, end_column=width, forced_header_row=header)
+        if region:
+            source_rows = rows[1:]
+            labels = [str(v.get(1, '')).strip() for _, v in source_rows]
+            kinds = [('note' if len(v) == 1 or label.startswith(('编制', '口径', '数据说明', '测算'))
+                      else 'check' if '核对' in label else 'total' if re.search(r'合计|总计', label)
+                      else 'detail') for label, (_, v) in zip(labels, source_rows)]
+            frame = region.frame.with_columns(pl.Series('来源行号', [r for r, _ in source_rows]),
+                                               pl.Series('报表行类型', kinds))
+            return [ParsedRegion(**{**region.__dict__, 'frame': frame})]
+
     result: list[ParsedRegion] = []
     for rows in vertical_bands:
         for start_column, end_column in _horizontal_regions(rows):
@@ -373,6 +430,10 @@ def _read_sheet_regions(
                 rows=rows,
                 start_column=start_column,
                 end_column=end_column,
+                forced_header_row=next((bounds[1] for ref in table_ranges or []
+                                        if (bounds := range_boundaries(ref))[0] == start_column
+                                        and bounds[2] == end_column
+                                        and any(r == bounds[1] for r, _ in rows)), None),
             )
             if region is not None:
                 result.append(region)
@@ -403,6 +464,7 @@ def _build_region(
     rows: list[SparseRow],
     start_column: int,
     end_column: int,
+    forced_header_row: int | None = None,
 ) -> ParsedRegion | None:
     region_rows = [
         (row_number, {column: value for column, value in values.items() if start_column <= column <= end_column})
@@ -412,10 +474,12 @@ def _build_region(
     if len(region_rows) < 2:
         return None
 
-    header_end_position = _find_header_position(region_rows, start_column, end_column)
+    header_end_position = (next((i for i, (r, _) in enumerate(region_rows) if r == forced_header_row), None)
+                           if forced_header_row is not None else
+                           _find_header_position(region_rows, start_column, end_column))
     if header_end_position is None:
         return None
-    header_start_position = _find_header_start(
+    header_start_position = header_end_position if forced_header_row is not None else _find_header_start(
         region_rows, header_end_position, start_column, end_column
     )
     headers = _expanded_headers(
@@ -476,6 +540,7 @@ def _find_header_position(
         following_profile = _row_profile(rows[position + 2][1], start_column, end_column)
         is_leaf_header = (
             next_row_number == current_row_number + 1
+            and len(rows[position][1]) < end_column - start_column + 1
             and next_profile["present"] >= 2
             # A sheet may place a second table beside a multi-level header.
             # Its numeric cells must not hide the textual leaf labels on the
@@ -776,7 +841,7 @@ def _infer_column_semantics(name: str, data_type: str, samples: list[Any]) -> di
     )
     is_identifier = any(
         token in lowered for token in ("编号", "编码", "单号", "凭证号", "客户id", "供应商id", "code")
-    ) or lowered == "id"
+    ) or lowered in {"id", "来源行号", "行次"}
     is_percentage = any(
         token in lowered for token in ("占比", "百分比", "比例", "比率", "percent", "ratio", "rate", "%")
     ) or lowered.endswith("率")

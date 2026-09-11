@@ -302,6 +302,9 @@ def auto_analyze(
     question: str,
     run_id: str | None = None,
 ) -> ToolExecutionResult:
+    from .financial_reports import financial_kind, query_financial_report
+    if datasets and all(financial_kind(d) for d in datasets):
+        return query_financial_report(task_id, datasets, run_id)
     dataset = max(datasets, key=lambda item: item.row_count)
     numeric = [
         c for c in dataset.columns
@@ -395,6 +398,7 @@ def auto_analyze(
             f"MAX(TRY_CAST({measure_sql} AS DOUBLE)) AS {_quote('最大值')}, COUNT(*) AS {_quote('记录数')} FROM {table}"
         )
         title = f"{measure.display_name}汇总"
+    sql = f'SELECT *, COUNT(*) OVER () AS "结果分组数" FROM ({sql}) AS overview_groups'
     return query_data(task_id, datasets, sql, title, run_id)
 
 

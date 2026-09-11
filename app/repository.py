@@ -855,7 +855,7 @@ class Repository(ReportRepositoryMixin):
                     status_message=?, error=NULL, updated_at=? WHERE id=?""",
                     (
                         active["id"], active["result_json"], restored_status,
-                        "提示词重跑失败，已保留原分析结果", utc_now(), task_id,
+                        "本次请求未完成，上次报告未受影响", utc_now(), task_id,
                     ),
                 )
                 status, progress = restored_status, 100

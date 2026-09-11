@@ -47,6 +47,12 @@ def retrieve_datasets(
     terms = _expanded_terms(question)
     alias_groups = _active_alias_groups(question)
     ranked = [_score_dataset(dataset, terms, alias_groups) for dataset in datasets]
+    normalized_question = _normalize(question)
+    ranked = [DatasetMatch(item.dataset, item.score + 100,
+                          (*item.reasons, '明确指定工作表'))
+              if any(len(name) >= 2 and _normalize(name) in normalized_question for name in
+                     [item.dataset.display_name, item.dataset.source_region.sheet_name if item.dataset.source_region else ''])
+              else item for item in ranked]
     ranked.sort(key=lambda item: (-item.score, -_semantic_quality(item.dataset), item.dataset.display_name))
     positive = [item for item in ranked if item.score > 0]
     return (positive or ranked)[: max(1, limit)]

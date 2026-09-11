@@ -235,13 +235,8 @@ function openDatasetWorkspace(datasetId?: string) {
           <div class="clarify-answer"><input v-model="prompt" placeholder="输入你的选择或补充说明"><button class="button primary" :disabled="!prompt.trim()" @click="submit()">确认并继续</button></div>
         </section>
 
-        <section v-if="turn.run?.status === 'off_topic'" class="notice-panel">
-          <h2>这个问题不属于数据分析范围</h2>
-          <button class="button" @click="prompt='根据应收账款明细，找出逾期金额最高的客户并汇总账龄'">使用示例问题</button>
-        </section>
-
         <section v-if="turn.run?.status === 'failed'" class="notice-panel danger">
-          <h2>分析没有完成</h2><p>{{ turn.run.error || store.error || '本轮分析执行失败' }}</p>
+          <h2>本次请求没有完成</h2><p>{{ /IntentDecision|validation errors|JSON Schema/.test(turn.run.error || '') ? '本次问题未能可靠识别，请明确要查询的指标。详细错误可在节点记录中查看。' : turn.run.error || store.error || '本轮请求执行失败' }}</p>
           <button class="button primary" :disabled="store.isRunning" @click="submit(resolveRetryQuestion(turn, conversationTurns))"><RefreshCw :size="16" />重新分析</button>
         </section>
 

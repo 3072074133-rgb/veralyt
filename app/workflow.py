@@ -31,7 +31,10 @@ from .evidence_validation import (
     unsupported_numbers as _unsupported_numbers,
     validate_claim as _validate_claim,
 )
-from .llm import LLMError, LLMStructuredOutputError, llm
+from .llm import LLMContextOverflowError, LLMError, LLMStructuredOutputError, LLMUnavailableError, llm
+from .financial_reports import financial_kind, financial_draft, query_financial_report
+from .followups import requested_metric, clearly_off_topic, calculate_metric, metric_draft, reuse_explanation, FORMULAS
+from .receivables import is_overdue_ranking, query_overdue, overdue_draft
 from .knowledge_service import retrieve_for_run
 from .models import (
     AnalysisDraft,
@@ -147,10 +150,54 @@ def _has_clear_analysis_intent(question: str, has_uploaded_data: bool) -> bool:
 
 
 def classify_node(state: AnalysisState) -> dict[str, Any]:
+    if not settings.model_intent_enabled:
+        return _legacy_classify_node(state)
+    repository.update_task(state.task_id, status=TaskStatus.CLASSIFYING, progress=20, status_message='正在理解本轮问题')
+    tracker = begin_node(state, 'classify')
+    context = state.conversation_summary or {}
+    recent = context.get('recent_messages') or []
+    compact = {
+        'user_question': state.user_question,
+        'has_uploaded_data': bool(state.datasets),
+        'available_metrics': list(FORMULAS),
+        'recent_messages': [{'role': item.get('role'), 'content': str(item.get('content', ''))[:400]}
+                            for item in recent[-4:] if isinstance(item, dict)],
+        'dataset_names': [str(item.get('display_name', ''))[:80] for item in state.datasets[:8]],
+        'report_topic': str((context.get('memory') or {}).get('task_goal', ''))[:200],
+    }
+    minimal = {**compact, 'recent_messages': compact['recent_messages'][-2:], 'dataset_names': []}
+    try:
+        try:
+            decision = llm.structured('intent_classifier', compact, IntentDecision, thinking=False,
+                prompt_override=tracker.prompt.content, fallback_contexts=[minimal],
+                diagnostics=tracker.record_diagnostics)
+        except (LLMStructuredOutputError, LLMContextOverflowError) as exc:
+            tracker.record_diagnostics({'classification_error': str(exc), 'fallback': 'clarification'})
+            decision = IntentDecision(route='clarification', reply='暂时无法可靠理解本轮问题，请补充具体需求或指标口径。')
+        if decision.route == 'derived_metric' and decision.metric not in FORMULAS:
+            decision = IntentDecision(route='clarification', reply='请明确指标口径：毛利率、营业利润率、净利润率或资产负债率。')
+        return tracker.complete({'intent': decision.model_dump(mode='json')})
+    except Exception as exc:
+        tracker.fail(exc)
+        raise
+
+
+def _legacy_classify_node(state: AnalysisState) -> dict[str, Any]:
     repository.update_task(state.task_id, status=TaskStatus.CLASSIFYING, progress=20, status_message="正在判断分析需求")
     tracker = begin_node(state, "classify")
     try:
         question = state.user_question
+        if settings.followup_enabled and clearly_off_topic(question):
+            return tracker.complete({'intent': IntentDecision(is_analysis=False, route='off_topic',
+                reason='当前请求属于非数据功能', confidence=1).model_dump(mode='json')})
+        metric = requested_metric(question) if settings.followup_enabled else None
+        if settings.followup_enabled and not metric and re.search(r'为什么|解释|说明', question) and re.search(r'利润|现金|收入|费用|报表|结果', question):
+            return tracker.complete({'intent': IntentDecision(is_analysis=True, route='explanation',
+                reason='解释已有结果，先检查证据', confidence=1).model_dump(mode='json')})
+        if metric and state.datasets:
+            return tracker.complete({'intent': IntentDecision(is_analysis=True,
+                route='clarification' if metric == 'ambiguous' else 'derived_metric', metric=metric,
+                reason='财务指标追问，先检查有效证据', confidence=1).model_dump(mode='json')})
         if _is_retry_analysis_request(question) and state.datasets:
             resolved = _previous_analysis_question(state) or question
             decision = IntentDecision(
@@ -196,7 +243,9 @@ def classify_node(state: AnalysisState) -> dict[str, Any]:
             )
         except LLMStructuredOutputError as exc:
             if not _has_clear_analysis_intent(question, bool(state.datasets)):
-                raise
+                return tracker.complete({'intent': IntentDecision(is_analysis=True, route='clarification',
+                    reason='本次问题未能可靠识别，请明确要查询的指标或问题', confidence=0,
+                    suggested_response='请说明要查询的指标，或明确这是一般知识问题。').model_dump(mode='json')})
             decision = IntentDecision(
                 is_analysis=True,
                 reason="请求包含明确的数据分析动作和业务数据对象。",
@@ -213,7 +262,7 @@ def classify_node(state: AnalysisState) -> dict[str, Any]:
 
 
 def route_intent(state: AnalysisState) -> str:
-    return "plan" if state.intent and state.intent.get("is_analysis") else "off_topic"
+    return 'plan' if state.intent and IntentDecision.model_validate(state.intent).is_analysis else 'off_topic'
 
 
 def off_topic_node(state: AnalysisState) -> dict[str, Any]:
@@ -221,7 +270,7 @@ def off_topic_node(state: AnalysisState) -> dict[str, Any]:
     message = decision.suggested_response or "这个问题不属于数据分析范围。请上传表格后提出计算、对比、趋势或异常检查需求。"
     if not state.is_replay:
         repository.add_message(state.task_id, "assistant", message)
-    repository.update_task(state.task_id, status=TaskStatus.OFF_TOPIC, progress=100, status_message="问题不属于数据分析范围")
+    repository.update_task(state.task_id, status=TaskStatus.OFF_TOPIC, progress=100, status_message="本轮已回复")
     return {"final_status": "off_topic"}
 
 
@@ -230,6 +279,43 @@ def plan_node(state: AnalysisState) -> dict[str, Any]:
     tracker = begin_node(state, "plan")
     try:
         datasets = [DatasetInfo.model_validate(item) for item in state.datasets]
+        if (state.intent or {}).get('route') != 'clarification' and is_overdue_ranking(state.user_question):
+            candidates = [d for d in datasets if financial_kind(d) == '应收账款']
+            if len(candidates) == 1:
+                return tracker.complete({'plan': AnalysisPlan(goal='查询逾期客户排名并说明账龄缺口',
+                    can_execute=True, steps=[PlanStep(id='overdue_ranking', purpose='按客户汇总原表逾期余额',
+                    tool='auto_analyze', dataset_id=candidates[0].id)]).model_dump(mode='json')})
+            return tracker.complete({'plan': AnalysisPlan(goal='确认应收明细', can_execute=False,
+                clarification_question='请明确要分析的应收账款表，需包含客户名称和逾期余额。').model_dump(mode='json')})
+        intent = state.intent or {}
+        if intent.get('route') == 'explanation':
+            reused = reuse_explanation(state)
+            if reused:
+                return tracker.complete({'plan': AnalysisPlan(goal='依据当前有效证据解释本轮问题',
+                    can_execute=True, steps=[]).model_dump(mode='json'),
+                    'tool_results': [reused.model_dump(mode='json')]})
+        if intent.get('route') == 'clarification':
+            question = ('你想了解毛利率、营业利润率，还是净利润率？请写出具体指标名称。'
+                        if intent.get('metric') == 'ambiguous' else intent.get('reply') or intent.get('suggested_response') or
+                        '请明确要查询的指标和期间。')
+            return tracker.complete({'plan': AnalysisPlan(goal='确认本轮需求', can_execute=False,
+                clarification_question=question).model_dump(mode='json')})
+        if intent.get('route') == 'derived_metric':
+            if intent.get('metric') not in FORMULAS:
+                return tracker.complete({'plan': AnalysisPlan(goal='确认指标口径', can_execute=False,
+                    clarification_question='请明确指标名称，目前支持净利润率、毛利率、营业利润率和资产负债率。').model_dump(mode='json')})
+            result, reason = calculate_metric(state, intent['metric'])
+            if result:
+                return tracker.complete({'plan': AnalysisPlan(goal='复用证据计算指标', can_execute=True,
+                    steps=[]).model_dump(mode='json'), 'tool_results': [result.model_dump(mode='json')]})
+            needed = {key[0] for key in FORMULAS[intent['metric']]}
+            financial = [d for d in datasets if financial_kind(d) in needed]
+            if not financial or '分母为零' in reason:
+                return tracker.complete({'plan': AnalysisPlan(goal='确认计算输入', can_execute=False,
+                    clarification_question=reason).model_dump(mode='json')})
+            return tracker.complete({'plan': AnalysisPlan(goal='补充指标输入', can_execute=True,
+                steps=[PlanStep(id='financial_report', purpose='查询当前版本的财务输入', tool='auto_analyze',
+                    dataset_id=financial[0].id, dataset_ids=[d.id for d in financial[1:]])]).model_dump(mode='json')})
         matches = retrieve_datasets(
             state.user_question,
             datasets,
@@ -276,6 +362,14 @@ def plan_node(state: AnalysisState) -> dict[str, Any]:
                 )],
             )
             tracker.record_diagnostics({"planning_source": "deterministic_department_profit"})
+        elif _is_generic_analysis_request(state.user_question) and any(financial_kind(d) for d in datasets):
+            matches = retrieve_datasets(state.user_question, datasets, limit=len(datasets))
+            financial = [d for d in datasets if financial_kind(d)]
+            plan = AnalysisPlan(goal="按财务报表项目提取金额并核对明细及主表", can_execute=True,
+                steps=[PlanStep(id="financial_report", purpose="分析整套财务报表并进行勾稽核对",
+                                tool="auto_analyze", dataset_id=financial[0].id,
+                                dataset_ids=[d.id for d in financial[1:]])])
+            tracker.record_diagnostics({"planning_source": "deterministic_financial_report"})
         elif _is_generic_analysis_request(state.user_question):
             viable_match = next((match for match in matches if _has_named_measure(match.dataset)), None)
             if viable_match is None:
@@ -480,7 +574,11 @@ def execute_node(state: AnalysisState) -> dict[str, Any]:
             if part
         )
         try:
-            if name == "profile_table":
+            if pending_step.id == 'overdue_ranking':
+                result = query_overdue(state.task_id, selected, state.run_id)
+            elif pending_step.id == "financial_report":
+                result = query_financial_report(state.task_id, selected_datasets, state.run_id)
+            elif name == "profile_table":
                 result = profile_table(state.task_id, selected, state.run_id)
             elif deterministic_strategy == "sectioned_department_profit":
                 result = query_department_profit(state.task_id, selected, state.run_id)
@@ -549,6 +647,25 @@ def draft_node(state: AnalysisState) -> dict[str, Any]:
     repository.update_task(state.task_id, status=TaskStatus.EXECUTING, progress=70, status_message="正在整理分析结论")
     tracker = begin_node(state, "draft")
     try:
+        overdue_result = next((r for r in state.tool_results if r.get('arguments', {}).get('strategy') == 'overdue_ranking'), None)
+        if overdue_result:
+            return tracker.complete({'draft': _finalize_draft(state, overdue_draft(overdue_result)).model_dump(mode='json')})
+        if (state.intent or {}).get('route') == 'derived_metric':
+            result = next((r for r in state.tool_results if r.get('arguments', {}).get('strategy') == 'derived_metric'), None)
+            if result is None:
+                calculated, reason = calculate_metric(state, state.intent['metric'])
+                if calculated is None:
+                    raise ToolError(reason)
+                result = calculated.model_dump(mode='json')
+                state.tool_results = [*state.tool_results, result]
+            draft = _finalize_draft(state, metric_draft(result))
+            return tracker.complete({'draft': draft.model_dump(mode='json'), 'tool_results': state.tool_results})
+        financial_result = next((r for r in reversed(state.tool_results)
+                                 if r.get('status') == 'success' and
+                                 r.get('arguments', {}).get('strategy') == 'financial_report'), None)
+        if financial_result:
+            draft = _finalize_draft(state, financial_draft(financial_result))
+            return tracker.complete({'draft': draft.model_dump(mode='json')})
         if _uses_sectioned_department_profit_result(state):
             department_profit = _department_profit_draft(state)
             if department_profit is not None:
@@ -559,6 +676,10 @@ def draft_node(state: AnalysisState) -> dict[str, Any]:
         if _is_generic_analysis_request(state.user_question):
             overview = _generic_overview_draft(state)
             if overview is not None:
+                if state.reflection and not (state.validation or {}).get('passed', True):
+                    overview.summary_evidence_pointers = []
+                    for item in [*overview.metrics, *overview.findings]:
+                        item.evidence_pointers = []
                 overview = _finalize_draft(state, overview)
                 _publish_chart_artifacts(state, overview)
                 return tracker.complete({"draft": overview.model_dump(mode="json")})
@@ -679,11 +800,14 @@ def reflect_node(state: AnalysisState) -> dict[str, Any]:
     try:
         validation = ValidationReport.model_validate(state.validation)
         if not validation.passed:
+            previous_issues = (state.reflection or {}).get('issues', [])
+            unchanged = {i.get('problem') for i in previous_issues} == {i.message for i in validation.issues}
+            route = 'finish' if unchanged and previous_issues else 'rewrite'
             return tracker.complete({
                 "reflection": ReflectionDecision(
                     verdict="revise",
-                    route="rewrite",
-                    reason="程序校验未通过，必须修复证据引用。",
+                    route=route,
+                    reason="复核问题未发生变化，已停止无效重试。" if route == 'finish' else "程序校验未通过，必须修复证据引用。",
                     issues=[
                         ReviewIssue(
                             target=issue.target or "analysis_draft",
@@ -698,6 +822,8 @@ def reflect_node(state: AnalysisState) -> dict[str, Any]:
             })
         if (
             _is_generic_analysis_request(state.user_question)
+            or any(r.get('arguments', {}).get('strategy') == 'overdue_ranking' for r in state.tool_results)
+            or (state.intent or {}).get('route') == 'derived_metric'
             or _uses_sectioned_department_profit_result(state)
         ) and validation.passed:
             return tracker.complete({
@@ -747,6 +873,8 @@ def reflect_node(state: AnalysisState) -> dict[str, Any]:
 
 def route_reflection(state: AnalysisState) -> str:
     decision = ReflectionDecision.model_validate(state.reflection)
+    if decision.route == 'finish':
+        return 'finish'
     if decision.verdict == "pass" or state.revision_round >= settings.max_revision_rounds:
         return "finish"
     return decision.route if decision.route in {"replan", "execute", "rewrite"} else "rewrite"
@@ -767,7 +895,7 @@ def finish_node(state: AnalysisState) -> dict[str, Any]:
     draft = AnalysisDraft.model_validate(state.draft)
     validation = ValidationReport.model_validate(state.validation)
     if not validation.passed:
-        message = "自动复核达到上限，仍有数字或证据未通过校验。系统没有交付这份结果，请缩小分析范围后重试。"
+        message = "数字或证据校验未通过，已停止交付。具体问题：" + "；".join(i.message for i in validation.issues[:4])
         if not state.is_replay:
             repository.add_message(state.task_id, "assistant", message)
         repository.update_task(
@@ -798,7 +926,7 @@ def finish_node(state: AnalysisState) -> dict[str, Any]:
     repository.update_task(
         state.task_id, status=final_status, progress=100,
         status_message="分析完成（有警告）" if draft.warnings else "分析完成",
-        result=draft, clear_error=True,
+        result=None if (state.intent or {}).get('route') in {'derived_metric', 'explanation'} else draft, clear_error=True,
     )
     if not state.is_replay:
         try:
@@ -990,6 +1118,8 @@ def _is_generic_analysis_request(question: str) -> bool:
 
 
 def _normalize_plan_for_request(plan: AnalysisPlan, question: str) -> AnalysisPlan:
+    if any(step.id == 'financial_report' for step in plan.steps):
+        return plan
     if not _is_generic_analysis_request(question):
         return plan
     source_steps = plan.steps[:3] or [PlanStep(
@@ -1076,7 +1206,8 @@ def _finalize_draft(state: AnalysisState, draft: AnalysisDraft) -> AnalysisDraft
     evidence = [item for item in repository.list_evidence(state.task_id) if item.id in evidence_ids]
     normalized = normalize_draft_charts(normalized, evidence, state.user_question)
     normalized.metrics = normalized.metrics[: settings.report_max_metrics]
-    normalized.findings = normalized.findings[: settings.report_max_findings]
+    if not any(r.get('arguments', {}).get('strategy') == 'financial_report' for r in state.tool_results):
+        normalized.findings = normalized.findings[: settings.report_max_findings]
     normalized.charts = normalized.charts[: settings.report_max_charts]
     normalized.suggested_questions = normalized.suggested_questions[: settings.report_max_suggested_questions]
     if _uses_sectioned_department_profit_result(state):
@@ -1238,7 +1369,7 @@ def _generic_overview_draft(state: AnalysisState) -> AnalysisDraft | None:
         for name in columns
         if name != dimension
         and _is_numeric_value(rows[0].get(name))
-        and not any(token in name for token in ("记录数", "占比", "贡献百分比", "排名", "阈值"))
+        and not any(token in name for token in ("记录数", "分组数", "占比", "贡献百分比", "排名", "阈值"))
     ]
     measure_priorities = ("净利润", "net profit", "利润", "profit", "金额", "amount", "收入", "revenue", "成本", "cost", "费用", "expense")
     measure = next(
@@ -1313,14 +1444,14 @@ def _generic_overview_draft(state: AnalysisState) -> AnalysisDraft | None:
         ))
     metrics.append(Metric(
         label=f"{dimension}分组数",
-        value=str(len(rows)),
+        value=str(rows[0]["结果分组数"]) if "结果分组数" in rows[0] else f"{len(rows)}个分组",
         change=None,
         direction="neutral",
         evidence_refs=[evidence_id],
         evidence_pointers=[EvidencePointer(
             evidence_id=evidence_id, row_index=0,
-            field=dimension, raw_value=str(len(rows)),
-        )],
+            field="结果分组数", raw_value=str(rows[0]["结果分组数"]),
+        )] if "结果分组数" in rows[0] else [],
     ))
     draft = AnalysisDraft(
         title=f"{measure}数据概览",
@@ -1603,6 +1734,8 @@ def run_analysis(run_id: str) -> None:
             TaskStatus.COMPLETED.value,
             TaskStatus.COMPLETED_WITH_WARNINGS.value,
         }
+        if (result.get('intent') or {}).get('route') in {'derived_metric', 'explanation'}:
+            activate = False
         repository.finish_execution(run_id, final_status, result.get("error"), draft, activate=activate)
         log_event(
             logger,
@@ -1614,8 +1747,14 @@ def run_analysis(run_id: str) -> None:
             duration_ms=duration_ms(started_at),
         )
     except LLMError as exc:
-        repository.finish_execution(run_id, "failed", str(exc))
-        repository.restore_active_run_after_failure(task_id, run_id, str(exc))
+        if isinstance(exc, LLMUnavailableError):
+            message = '本地模型暂时不可用，请检查模型服务后重试。原报告未受影响。'
+        elif isinstance(exc, LLMContextOverflowError):
+            message = '本次请求超出模型上下文容量，请缩短问题或缩小分析范围。原报告未受影响。'
+        else:
+            message = '本次请求的模型输出未能可靠解析，请明确问题或稍后重试。详细原因见节点记录。'
+        repository.finish_execution(run_id, "failed", message)
+        repository.restore_active_run_after_failure(task_id, run_id, message)
         log_event(logger, "analysis.failed", task_id=task_id, run_id=run_id, error_type=type(exc).__name__, duration_ms=duration_ms(started_at))
     except Exception as exc:
         repository.finish_execution(run_id, "failed", str(exc))

@@ -71,17 +71,18 @@ def test_llm_node_records_prompt_and_state(replay_repo: str, monkeypatch: pytest
 
     nodes = repository.list_node_executions(replay_repo, run_id)
     detail = repository.get_node_execution(replay_repo, nodes[0].id)
-    assert output["intent"]["is_analysis"] is True
+    assert output["intent"]["route"] == 'analysis'
     assert nodes[0].node_name == "classify"
     assert nodes[0].prompt_version.content_hash
     assert detail.input_state["user_question"] == "分析收入"
-    assert detail.output_state["intent"]["is_analysis"] is True
+    assert detail.output_state["intent"]["route"] == 'analysis'
 
 
 def test_retry_intent_skips_llm_and_restores_previous_question(
     replay_repo: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr('app.workflow.settings.model_intent_enabled', False)
     run_id = repository.start_execution(replay_repo, "重新分析")
     state = AnalysisState(
         task_id=replay_repo,
@@ -102,7 +103,7 @@ def test_retry_intent_skips_llm_and_restores_previous_question(
     monkeypatch.setattr("app.workflow.llm.structured", unexpected_call)
     output = classify_node(state)
 
-    assert output["intent"]["is_analysis"] is True
+    assert output["intent"]["route"] == 'analysis'
     assert output["user_question"] == "分析报表，统计各部门盈亏"
     detail = repository.get_node_execution(replay_repo, repository.list_node_executions(replay_repo, run_id)[0].id)
     assert detail.diagnostics["classification_source"] == "deterministic_retry"
@@ -112,6 +113,7 @@ def test_clear_analysis_request_skips_model_classification(
     replay_repo: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr('app.workflow.settings.model_intent_enabled', False)
     run_id = repository.start_execution(replay_repo, "分析报表，统计各部门盈亏")
     state = AnalysisState(
         task_id=replay_repo,
@@ -126,7 +128,7 @@ def test_clear_analysis_request_skips_model_classification(
     monkeypatch.setattr("app.workflow.llm.structured", unexpected_call)
     output = classify_node(state)
 
-    assert output["intent"]["is_analysis"] is True
+    assert output["intent"]["route"] == 'analysis'
     detail = repository.get_node_execution(replay_repo, repository.list_node_executions(replay_repo, run_id)[0].id)
     assert detail.diagnostics["classification_source"] == "deterministic_analysis"
 
@@ -135,6 +137,7 @@ def test_generic_request_restores_specific_goal_from_memory(
     replay_repo: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr('app.workflow.settings.model_intent_enabled', False)
     run_id = repository.start_execution(replay_repo, "分析报表")
     state = AnalysisState(
         task_id=replay_repo,
@@ -298,8 +301,8 @@ def test_ambiguous_request_still_rejects_invalid_model_structure(
         lambda *args, **kwargs: (_ for _ in ()).throw(LLMStructuredOutputError("invalid IntentDecision")),
     )
 
-    with pytest.raises(LLMStructuredOutputError):
-        classify_node(state)
+    result = classify_node(state)
+    assert result['intent']['route'] == 'clarification'
 
 
 def test_replay_starts_from_snapshot_and_activates_new_branch(
