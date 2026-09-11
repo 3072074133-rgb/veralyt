@@ -3,9 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 import time
 
+import duckdb
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
 
+from app.ingestion import task_dir
 from app.main import app
 from app.models import AnalysisDraft
 from app.repository import repository
@@ -155,6 +157,132 @@ def test_preview_profile_correction_and_asset_revision(tmp_path: Path) -> None:
                 f"{old_version_task['datasets'][0]['id']}/preview"
             ).json()
             assert old_preview["rows"][0]["收入"] == 100
+    finally:
+        repository.db_path = old_path
+
+
+def test_row_ids_remain_stable_across_sort_delete_add_and_correction(tmp_path: Path) -> None:
+    old_path = repository.db_path
+    repository.db_path = tmp_path / "stable-row-ids.sqlite"
+    try:
+        with TestClient(app) as client:
+            task_id = client.post("/api/v1/tasks").json()["id"]
+            upload = client.post(
+                f"/api/v1/tasks/{task_id}/files",
+                files={
+                    "files": (
+                        "sales.csv",
+                        "客户,收入\n甲,100\n乙,300\n丙,200\n".encode(),
+                        "text/csv",
+                    )
+                },
+            )
+            dataset = upload.json()["task"]["datasets"][0]
+            dataset_id = dataset["id"]
+            assert "__aa_row_id" not in {column["name"] for column in dataset["columns"]}
+
+            sorted_preview = client.get(
+                f"/api/v1/tasks/{task_id}/datasets/{dataset_id}/preview",
+                params={"sort_by": "收入", "sort_direction": "desc"},
+            ).json()
+            assert [row["客户"] for row in sorted_preview["rows"]] == ["乙", "丙", "甲"]
+            assert [row["__row_id"] for row in sorted_preview["rows"]] == [2, 3, 1]
+
+            corrected = client.post(
+                f"/api/v1/tasks/{task_id}/datasets/{dataset_id}/corrections",
+                json={
+                    "expected_data_revision": 1,
+                    "cell_updates": [{"row_id": 2, "column": "收入", "value": 350}],
+                },
+            )
+            assert corrected.status_code == 200, corrected.text
+
+            deleted = client.post(
+                f"/api/v1/tasks/{task_id}/datasets/{dataset_id}/corrections",
+                json={
+                    "expected_data_revision": 2,
+                    "deleted_row_ids": [3],
+                },
+            )
+            assert deleted.status_code == 200, deleted.text
+
+            added = client.post(
+                f"/api/v1/tasks/{task_id}/datasets/{dataset_id}/corrections",
+                json={
+                    "expected_data_revision": 3,
+                    "added_rows": [{"客户": "丁", "收入": 400}],
+                },
+            )
+            assert added.status_code == 200, added.text
+            preview = client.get(
+                f"/api/v1/tasks/{task_id}/datasets/{dataset_id}/preview"
+            ).json()
+            assert [(row["__row_id"], row["客户"], row["收入"]) for row in preview["rows"]] == [
+                (1, "甲", 100),
+                (2, "乙", 350),
+                (4, "丁", 400),
+            ]
+
+            second_correction = client.post(
+                f"/api/v1/tasks/{task_id}/datasets/{dataset_id}/corrections",
+                json={
+                    "expected_data_revision": 4,
+                    "cell_updates": [{"row_id": 4, "column": "收入", "value": 450}],
+                },
+            )
+            assert second_correction.status_code == 200, second_correction.text
+            final_rows = client.get(
+                f"/api/v1/tasks/{task_id}/datasets/{dataset_id}/preview"
+            ).json()["rows"]
+            assert next(row for row in final_rows if row["__row_id"] == 4)["收入"] == 450
+    finally:
+        repository.db_path = old_path
+
+
+def test_legacy_table_gets_a_row_id_high_water_mark_before_deletion(tmp_path: Path) -> None:
+    old_path = repository.db_path
+    repository.db_path = tmp_path / "legacy-row-ids.sqlite"
+    try:
+        with TestClient(app) as client:
+            task_id = client.post("/api/v1/tasks").json()["id"]
+            upload = client.post(
+                f"/api/v1/tasks/{task_id}/files",
+                files={
+                    "files": (
+                        "legacy.csv",
+                        "客户,收入\n甲,100\n乙,200\n丙,300\n".encode(),
+                        "text/csv",
+                    )
+                },
+            )
+            dataset = upload.json()["task"]["datasets"][0]
+            db_path = task_dir(task_id) / "work" / "analysis.duckdb"
+            with duckdb.connect(str(db_path)) as connection:
+                connection.execute(
+                    f'ALTER TABLE "{dataset["table_name"]}" DROP COLUMN "__aa_row_id"'
+                )
+                connection.execute(
+                    'DELETE FROM "__aa_row_sequences" WHERE dataset_id=?',
+                    [dataset["id"]],
+                )
+
+            deleted = client.post(
+                f"/api/v1/tasks/{task_id}/datasets/{dataset['id']}/corrections",
+                json={"expected_data_revision": 1, "deleted_row_ids": [3]},
+            )
+            assert deleted.status_code == 200, deleted.text
+            added = client.post(
+                f"/api/v1/tasks/{task_id}/datasets/{dataset['id']}/corrections",
+                json={
+                    "expected_data_revision": 2,
+                    "added_rows": [{"客户": "丁", "收入": 400}],
+                },
+            )
+            assert added.status_code == 200, added.text
+            rows = client.get(
+                f"/api/v1/tasks/{task_id}/datasets/{dataset['id']}/preview"
+            ).json()["rows"]
+            assert [row["__row_id"] for row in rows] == [1, 2, 4]
     finally:
         repository.db_path = old_path
 

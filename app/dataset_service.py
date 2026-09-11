@@ -22,6 +22,13 @@ from .models import (
     UploadedFile,
 )
 from .repository import repository
+from .row_identity import (
+    INTERNAL_ROW_ID,
+    ensure_internal_row_id,
+    initialize_row_sequence,
+    reserve_row_ids,
+    table_has_internal_row_id,
+)
 
 
 def preview_dataset(
@@ -38,17 +45,27 @@ def preview_dataset(
     allowed = {column.name for column in dataset.columns}
     if sort_by and sort_by not in allowed:
         raise ValueError("排序字段不存在")
-    order = ""
-    if sort_by:
-        order = f' ORDER BY "{_quote_identifier(sort_by)}" {"DESC" if sort_direction == "desc" else "ASC"} NULLS LAST'
     offset = (page - 1) * page_size
     db_path = task_dir(task_id) / "work" / "analysis.duckdb"
     select_columns = ",".join(f'"{_quote_identifier(column.name)}"' for column in dataset.columns)
-    query = (
-        f'SELECT row_number() OVER () AS __row_id,{select_columns} '
-        f'FROM "{_quote_identifier(dataset.table_name)}"{order} LIMIT ? OFFSET ?'
-    )
     with duckdb.connect(str(db_path), read_only=True) as connection:
+        row_id = (
+            f'"{_quote_identifier(INTERNAL_ROW_ID)}"'
+            if table_has_internal_row_id(connection, dataset.table_name)
+            else "rowid + 1"
+        )
+        order_parts = []
+        if sort_by:
+            order_parts.append(
+                f'"{_quote_identifier(sort_by)}" '
+                f'{"DESC" if sort_direction == "desc" else "ASC"} NULLS LAST'
+            )
+        order_parts.append(row_id)
+        order = " ORDER BY " + ",".join(order_parts)
+        query = (
+            f'SELECT {row_id} AS __row_id,{select_columns} '
+            f'FROM "{_quote_identifier(dataset.table_name)}"{order} LIMIT ? OFFSET ?'
+        )
         rows = _records(connection.execute(query, [page_size, offset]))
     return DatasetPreview(
         dataset_id=dataset.id,
@@ -116,22 +133,35 @@ def correct_dataset(
 
     db_path = task_dir(task_id) / "work" / "analysis.duckdb"
     with duckdb.connect(str(db_path), read_only=True) as connection:
+        row_id = (
+            f'"{_quote_identifier(INTERNAL_ROW_ID)}"'
+            if table_has_internal_row_id(connection, current.table_name)
+            else "rowid + 1"
+        )
+        business_columns = [column.name for column in current.columns]
+        selected_columns = ",".join(
+            f'"{_quote_identifier(name)}"' for name in business_columns
+        )
         result = connection.execute(
-            f'SELECT * FROM "{_quote_identifier(current.table_name)}"'
+            f'SELECT {row_id} AS "{INTERNAL_ROW_ID}",{selected_columns} '
+            f'FROM "{_quote_identifier(current.table_name)}"'
         )
         names = [item[0] for item in result.description]
         frame = pl.DataFrame(result.fetchall(), schema=names, orient="row")
-    frame = frame.with_row_index("__row_id", offset=1)
-    known_columns = set(frame.columns) - {"__row_id"}
+    known_columns = set(business_columns)
+    known_row_ids = set(frame[INTERNAL_ROW_ID].to_list())
+    minimum_next_row = int(frame[INTERNAL_ROW_ID].max() or 0) + 1
+    with duckdb.connect(str(db_path)) as connection:
+        reserve_row_ids(connection, dataset_id, 0, minimum_next_row)
     for update in request.cell_updates:
         if update.column not in known_columns:
             raise ValueError(f"字段不存在：{update.column}")
-        if update.row_id > frame.height:
+        if update.row_id not in known_row_ids:
             raise ValueError(f"行不存在：{update.row_id}")
         dtype = frame.schema[update.column]
         try:
             frame = frame.with_columns(
-                pl.when(pl.col("__row_id") == update.row_id)
+                pl.when(pl.col(INTERNAL_ROW_ID) == update.row_id)
                 .then(pl.lit(update.value).cast(dtype, strict=True))
                 .otherwise(pl.col(update.column))
                 .alias(update.column)
@@ -139,27 +169,35 @@ def correct_dataset(
         except Exception as exc:
             raise ValueError(f"{update.column} 的新值与字段类型不匹配") from exc
     if request.deleted_row_ids:
-        invalid = [row_id for row_id in request.deleted_row_ids if row_id > frame.height]
+        invalid = [row_id for row_id in request.deleted_row_ids if row_id not in known_row_ids]
         if invalid:
             raise ValueError(f"待删除行不存在：{invalid[0]}")
-        frame = frame.filter(~pl.col("__row_id").is_in(request.deleted_row_ids))
+        frame = frame.filter(~pl.col(INTERNAL_ROW_ID).is_in(request.deleted_row_ids))
     if request.added_rows:
         normalized = []
         for source in request.added_rows:
             unknown = set(source) - known_columns
             if unknown:
                 raise ValueError(f"新增行包含未知字段：{sorted(unknown)[0]}")
-            normalized.append({name: source.get(name) for name in known_columns})
+            normalized.append({name: source.get(name) for name in business_columns})
         try:
-            additions = pl.DataFrame(normalized, schema={name: frame.schema[name] for name in known_columns})
+            additions = pl.DataFrame(
+                normalized,
+                schema={name: frame.schema[name] for name in business_columns},
+            )
         except Exception as exc:
             raise ValueError("新增行中的值与字段类型不匹配") from exc
-        next_row = int(frame["__row_id"].max() or 0) + 1
-        additions = additions.with_row_index("__row_id", offset=next_row)
+        with duckdb.connect(str(db_path)) as connection:
+            next_row = reserve_row_ids(
+                connection, dataset_id, len(additions), minimum_next_row
+            )
+        additions = additions.with_row_index(INTERNAL_ROW_ID, offset=next_row).with_columns(
+            pl.col(INTERNAL_ROW_ID).cast(frame.schema[INTERNAL_ROW_ID])
+        )
         frame = pl.concat([frame, additions.select(frame.columns)], how="vertical")
 
     columns = _updated_columns(current.columns, request.metadata_updates, frame)
-    published = frame.drop("__row_id")
+    published = frame
     revision_token = uuid.uuid4().hex[:12]
     table_name = f"{current.table_name}_r{revision_token}"
     output_path = task_dir(task_id) / "work" / f"{dataset_id}_{revision_token}.parquet"
@@ -228,6 +266,8 @@ def create_task_from_revision(dataset_id: str, revision_id: str) -> str:
                     f'CREATE TABLE "{_quote_identifier(table_name)}" AS SELECT * FROM read_parquet(?)',
                     [str(source_path)],
                 )
+                ensure_internal_row_id(connection, table_name)
+                initialize_row_sequence(connection, task_dataset_id, table_name)
                 datasets.append(source.model_copy(update={
                     "id": task_dataset_id,
                     "file_id": file_id,

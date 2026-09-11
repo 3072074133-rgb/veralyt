@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.config import settings
@@ -120,6 +121,21 @@ def test_vector_knowledge_versions_bindings_and_run_snapshot(
             )
             assert unbound.status_code == 200
             assert client.get(f"/api/v1/tasks/{task_id}").json()["result"] is None
+            with pytest.raises(ValueError, match="旧知识库版本"):
+                repository.start_execution(
+                    task_id,
+                    "基于旧节点重跑",
+                    status="queued",
+                    data_revision=0,
+                    input_snapshot=snapshot,
+                )
+            with pytest.raises(ValueError, match="旧知识库版本"):
+                repository.finish_execution(
+                    run_id,
+                    "completed",
+                    result=AnalysisDraft(summary="不应写回的新结果"),
+                    activate=True,
+                )
             activate = client.post(f"/api/v1/tasks/{task_id}/runs/{run_id}/activate")
             assert activate.status_code == 409
             assert "旧知识库版本" in activate.json()["detail"]

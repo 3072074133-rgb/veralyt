@@ -1552,8 +1552,10 @@ def run_analysis(run_id: str) -> None:
     task_id = run.task_id
     question = run.question
     snapshot = repository.get_task(task_id)
-    if snapshot.data_revision != run.data_revision:
-        repository.finish_execution(run_id, "failed", "数据已更新，请基于最新数据重新分析")
+    try:
+        repository.assert_run_context_current(task_id, run_id)
+    except ValueError as exc:
+        repository.finish_execution(run_id, "failed", str(exc))
         log_event(logger, "analysis.rejected_stale", task_id=task_id, run_id=run_id)
         return
     if not repository.mark_execution_running(run_id):
@@ -1628,6 +1630,12 @@ def run_replay(run_id: str) -> None:
     run = repository.get_run_by_id(run_id)
     if not run.forked_from_node_execution_id or not run.prompt_version_id:
         raise ValueError("重跑记录缺少来源节点或提示词版本")
+    try:
+        repository.assert_run_context_current(run.task_id, run.id)
+    except ValueError as exc:
+        repository.finish_execution(run.id, "failed", str(exc))
+        repository.restore_active_run_after_failure(run.task_id, run.id, str(exc))
+        return
     source = repository.get_node_execution(run.task_id, run.forked_from_node_execution_id)
     payload = _migrate_state(source.input_state, source.state_schema_version)
     versions = repository.prompt_versions_for_run(source.run_id)

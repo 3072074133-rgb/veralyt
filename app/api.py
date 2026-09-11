@@ -459,8 +459,11 @@ async def replay_node(task_id: str, execution_id: str, request: ReplayNodeReques
         raise HTTPException(404, "节点快照不存在") from exc
     if source.status != "completed":
         raise HTTPException(409, "只能从已经完成的节点重新运行")
-    if source_run.data_revision != snapshot.data_revision:
-        raise HTTPException(409, "该节点基于旧数据版本，不能重跑")
+    try:
+        repository.assert_run_context_current(task_id, source.run_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    source_input_snapshot = repository.get_run_input_snapshot(source.run_id)
     content = request.prompt_content.strip()
     if content == source.prompt_version.content.strip():
         raise HTTPException(400, "提示词没有发生变化")
@@ -470,17 +473,21 @@ async def replay_node(task_id: str, execution_id: str, request: ReplayNodeReques
         content,
         source.prompt_version.id,
     )
-    run_id = repository.start_execution(
-        task_id,
-        source_run.question,
-        status="queued",
-        parent_run_id=source.run_id,
-        forked_from_node_execution_id=source.id,
-        entry_node=source.node_name,
-        prompt_version_id=prompt.id,
-        data_revision=source_run.data_revision,
-        message_sequence=source_run.message_sequence,
-    )
+    try:
+        run_id = repository.start_execution(
+            task_id,
+            source_run.question,
+            status="queued",
+            parent_run_id=source.run_id,
+            forked_from_node_execution_id=source.id,
+            entry_node=source.node_name,
+            prompt_version_id=prompt.id,
+            data_revision=source_run.data_revision,
+            message_sequence=source_run.message_sequence,
+            input_snapshot=source_input_snapshot,
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
     repository.update_task(
         task_id,
         status=TaskStatus.CLASSIFYING,

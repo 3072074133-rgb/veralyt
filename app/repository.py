@@ -586,9 +586,11 @@ class Repository(ReportRepositoryMixin):
         prompt_version_id: str | None = None,
         data_revision: int | None = None,
         message_sequence: int | None = None,
+        input_snapshot: dict[str, Any] | None = None,
     ) -> str:
         run_id = run_id or str(uuid.uuid4())
         with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             task = connection.execute("SELECT data_revision FROM tasks WHERE id=?", (task_id,)).fetchone()
             if task is None:
                 raise KeyError(task_id)
@@ -599,6 +601,15 @@ class Repository(ReportRepositoryMixin):
                     "SELECT COALESCE(MAX(rowid),0) FROM messages WHERE task_id=?", (task_id,)
                 ).fetchone()
                 message_sequence = int(row[0])
+            captured_input = (
+                input_snapshot
+                if input_snapshot is not None
+                else self._task_input_snapshot(connection, task_id)
+            )
+            if input_snapshot is not None:
+                self._assert_snapshot_current(
+                    connection, task_id, data_revision, captured_input
+                )
             connection.execute(
                 """INSERT INTO execution_runs(
                 id,task_id,question,status,error,started_at,finished_at,parent_run_id,
@@ -609,7 +620,7 @@ class Repository(ReportRepositoryMixin):
                     run_id, task_id, question, status, utc_now(), parent_run_id,
                     forked_from_node_execution_id, entry_node, prompt_version_id,
                     data_revision, message_sequence,
-                    json.dumps(self._task_input_snapshot(connection, task_id), ensure_ascii=False),
+                    json.dumps(captured_input, ensure_ascii=False),
                 ),
             )
         return run_id
@@ -709,22 +720,21 @@ class Repository(ReportRepositoryMixin):
     ) -> None:
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """SELECT task_id,data_revision,input_snapshot_json
+                FROM execution_runs WHERE id=?""",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(run_id)
+            if result is not None or activate:
+                self._assert_run_input_current(connection, row)
             connection.execute(
                 """UPDATE execution_runs SET status=?, error=?, finished_at=?,
                 result_json=COALESCE(?, result_json), is_active=? WHERE id=?""",
                 (status, error, utc_now(), result.model_dump_json() if result else None, int(activate), run_id),
             )
             if activate:
-                row = connection.execute(
-                    "SELECT task_id,data_revision FROM execution_runs WHERE id=?", (run_id,)
-                ).fetchone()
-                if row is None:
-                    raise KeyError(run_id)
-                task = connection.execute(
-                    "SELECT data_revision FROM tasks WHERE id=?", (row["task_id"],)
-                ).fetchone()
-                if task is None or int(task["data_revision"]) != int(row["data_revision"]):
-                    raise ValueError("分析结果基于旧数据版本，不能设为当前结果")
                 connection.execute("UPDATE execution_runs SET is_active=0 WHERE task_id=? AND id<>?", (row["task_id"], run_id))
                 connection.execute(
                     "UPDATE tasks SET active_run_id=?, result_json=?, updated_at=? WHERE id=?",
@@ -755,6 +765,17 @@ class Repository(ReportRepositoryMixin):
         if row is None:
             raise KeyError(run_id)
         return json.loads(row["input_snapshot_json"] or "{}")
+
+    def assert_run_context_current(self, task_id: str, run_id: str) -> None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT task_id,data_revision,input_snapshot_json
+                FROM execution_runs WHERE task_id=? AND id=?""",
+                (task_id, run_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(run_id)
+            self._assert_run_input_current(connection, row)
 
     def list_runs(self, task_id: str) -> list[WorkflowRun]:
         self._task_row(task_id)
@@ -797,20 +818,16 @@ class Repository(ReportRepositoryMixin):
         run = self.get_run(task_id, run_id)
         if run.status not in {"completed", "completed_with_warnings"} or run.result is None:
             raise ValueError("只能切换到已完成且包含结果的分析分支")
-        task = self._task_row(task_id)
-        if run.data_revision != int(task["data_revision"]):
-            raise ValueError("该分支基于旧数据版本，不能设为当前结果")
         with self.connect() as connection:
-            snapshot_row = connection.execute(
-                "SELECT input_snapshot_json FROM execution_runs WHERE id=?", (run_id,)
-            ).fetchone()
-            run_snapshot = json.loads(snapshot_row["input_snapshot_json"] or "{}")
-            current_snapshot = self._task_input_snapshot(connection, task_id)
-            if sorted(run_snapshot.get("knowledge_revision_ids", [])) != sorted(
-                current_snapshot.get("knowledge_revision_ids", [])
-            ):
-                raise ValueError("该分支基于旧知识库版本，不能设为当前结果")
             connection.execute("BEGIN IMMEDIATE")
+            context_row = connection.execute(
+                """SELECT task_id,data_revision,input_snapshot_json
+                FROM execution_runs WHERE task_id=? AND id=?""",
+                (task_id, run_id),
+            ).fetchone()
+            if context_row is None:
+                raise KeyError(run_id)
+            self._assert_run_input_current(connection, context_row)
             activated_status = TaskStatus(run.status)
             connection.execute("UPDATE execution_runs SET is_active=0 WHERE task_id=?", (task_id,))
             connection.execute("UPDATE execution_runs SET is_active=1 WHERE id=?", (run_id,))
@@ -1986,6 +2003,57 @@ class Repository(ReportRepositoryMixin):
             "knowledge_revision_ids": [row["revision_id"] for row in knowledge_rows],
             "knowledge_revisions": [dict(row) for row in knowledge_rows],
         }
+
+    @staticmethod
+    def _input_fingerprint(snapshot: dict[str, Any]) -> str:
+        canonical = {
+            "revision_ids": sorted(str(value) for value in snapshot.get("revision_ids", [])),
+            "knowledge_revision_ids": sorted(
+                str(value) for value in snapshot.get("knowledge_revision_ids", [])
+            ),
+        }
+        encoded = json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _assert_run_input_current(
+        cls, connection: sqlite3.Connection, run: sqlite3.Row
+    ) -> None:
+        cls._assert_snapshot_current(
+            connection,
+            run["task_id"],
+            int(run["data_revision"]),
+            json.loads(run["input_snapshot_json"] or "{}"),
+        )
+
+    @classmethod
+    def _assert_snapshot_current(
+        cls,
+        connection: sqlite3.Connection,
+        task_id: str,
+        data_revision: int,
+        run_snapshot: dict[str, Any],
+    ) -> None:
+        task = connection.execute(
+            "SELECT data_revision FROM tasks WHERE id=?", (task_id,)
+        ).fetchone()
+        if task is None:
+            raise KeyError(task_id)
+        if int(task["data_revision"]) != int(data_revision):
+            raise ValueError("分析分支基于旧数据版本，请基于最新数据重新分析")
+
+        current_snapshot = cls._task_input_snapshot(connection, task_id)
+        if not run_snapshot:
+            if current_snapshot.get("knowledge_revision_ids"):
+                raise ValueError("分析分支缺少知识库版本信息，请基于当前知识库重新分析")
+            return
+        if cls._input_fingerprint(run_snapshot) == cls._input_fingerprint(current_snapshot):
+            return
+        if sorted(run_snapshot.get("knowledge_revision_ids", [])) != sorted(
+            current_snapshot.get("knowledge_revision_ids", [])
+        ):
+            raise ValueError("分析分支基于旧知识库版本，请基于当前知识库重新分析")
+        raise ValueError("分析分支的输入数据版本已变化，请重新分析")
 
     @staticmethod
     def _content_hash(path: Path, fallback: str = "") -> str:

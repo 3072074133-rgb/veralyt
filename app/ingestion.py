@@ -23,6 +23,7 @@ from .config import settings
 from .models import DatasetColumn, DatasetInfo, DatasetRegion, UploadedFile
 from .observability import bind_log_context, duration_ms, log_event
 from .repository import repository
+from .row_identity import INTERNAL_ROW_ID, initialize_row_sequence
 
 
 ALLOWED_EXTENSIONS = {".xlsx", ".csv"}
@@ -171,7 +172,7 @@ def ingest_file(
             connection.execute("SET threads=4")
             connection.execute("BEGIN TRANSACTION")
             for index, region in enumerate(regions):
-                frame = region.frame
+                frame = _rename_reserved_row_id(region.frame)
                 if frame.height == 0 or frame.width == 0:
                     continue
                 dataset_id = str(uuid.uuid4())
@@ -179,11 +180,15 @@ def ingest_file(
                 parquet_path = output_dir / f"{dataset_id}.parquet"
                 parquet_paths.append(parquet_path)
                 created_tables.append(table_name)
-                frame.write_parquet(parquet_path)
+                stored_frame = frame.with_row_index(INTERNAL_ROW_ID, offset=1).with_columns(
+                    pl.col(INTERNAL_ROW_ID).cast(pl.Int64)
+                )
+                stored_frame.write_parquet(parquet_path)
                 connection.execute(
                     f'CREATE OR REPLACE TABLE "{table_name}" AS SELECT * FROM read_parquet(?)',
                     [str(parquet_path)],
                 )
+                initialize_row_sequence(connection, dataset_id, table_name)
                 columns = [
                     DatasetColumn(
                         name=name,
@@ -245,6 +250,17 @@ def ingest_file(
             duration_ms=duration_ms(started_at),
         )
     return datasets
+
+
+def _rename_reserved_row_id(frame: pl.DataFrame) -> pl.DataFrame:
+    if INTERNAL_ROW_ID not in frame.columns:
+        return frame
+    candidate = f"原始{INTERNAL_ROW_ID}"
+    suffix = 2
+    while candidate in frame.columns:
+        candidate = f"原始{INTERNAL_ROW_ID}_{suffix}"
+        suffix += 1
+    return frame.rename({INTERNAL_ROW_ID: candidate})
 
 
 def _read_xlsx(path: Path) -> WorkbookReadResult:
