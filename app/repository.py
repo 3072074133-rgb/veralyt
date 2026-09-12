@@ -5,6 +5,9 @@ import hashlib
 import shutil
 import sqlite3
 import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -186,6 +189,18 @@ class _ClosingConnection(sqlite3.Connection):
             return super().__exit__(exc_type, exc_value, traceback)
         finally:
             self.close()
+
+
+_evidence_cache: ContextVar[tuple[str, str, dict[str, EvidenceRecord | None]] | None] = ContextVar(
+    'evidence_cache', default=None
+)
+
+
+@lru_cache(maxsize=128)
+def _cached_relationships(database: str, task_id: str, catalog: tuple[str, ...]) -> tuple[str, ...]:
+    from .dataset_retrieval import detect_dataset_relationships
+    return tuple(DatasetRelationship.model_validate(item).model_dump_json()
+                 for item in detect_dataset_relationships([DatasetInfo.model_validate_json(item) for item in catalog]))
 
 
 class Repository(ReportRepositoryMixin):
@@ -1071,6 +1086,11 @@ class Repository(ReportRepositoryMixin):
             )
 
     def get_evidence(self, task_id: str, evidence_id: str) -> EvidenceRecord | None:
+        cached = _evidence_cache.get()
+        if cached and cached[:2] == (str(self.db_path.resolve()), task_id):
+            if evidence_id not in cached[2]:
+                self.list_evidence_by_ids(task_id, [evidence_id])
+            return cached[2].get(evidence_id)
         with self.connect() as connection:
             row = connection.execute(
                 "SELECT * FROM evidence WHERE task_id=? AND id=?", (task_id, evidence_id)
@@ -1084,6 +1104,71 @@ class Repository(ReportRepositoryMixin):
             source_dataset_ids=json.loads(row["source_dataset_ids_json"] or "[]"),
             source_revision_ids=json.loads(row["source_revision_ids_json"] or "[]"),
             query=row["query"], query_hash=row["query_hash"],
+        )
+
+    @contextmanager
+    def evidence_scope(self, task_id: str):
+        token = _evidence_cache.set((str(self.db_path.resolve()), task_id, {}))
+        try:
+            yield
+        finally:
+            _evidence_cache.reset(token)
+
+    def list_evidence_by_ids(self, task_id: str, evidence_ids) -> list[EvidenceRecord]:
+        identifiers = sorted(set(evidence_ids))
+        if not identifiers:
+            return []
+        scoped = _evidence_cache.get()
+        cache = scoped[2] if scoped and scoped[:2] == (str(self.db_path.resolve()), task_id) else {}
+        missing = [identifier for identifier in identifiers if identifier not in cache]
+        if missing:
+            with self.connect() as connection:
+                for offset in range(0, len(missing), 400):
+                    batch = missing[offset:offset + 400]
+                    placeholders = ','.join('?' for _ in batch)
+                    rows = connection.execute(
+                        f'SELECT * FROM evidence WHERE task_id=? AND id IN ({placeholders})',
+                        [task_id, *batch],
+                    ).fetchall()
+                    cache.update({identifier: None for identifier in batch})
+                    cache.update({row['id']: self._evidence_record(row) for row in rows})
+        return sorted((cache[identifier] for identifier in identifiers if cache[identifier] is not None),
+                      key=lambda item: (item.created_at, item.id))
+
+    def evidence_ids(self, task_id: str) -> set[str]:
+        with self.connect() as connection:
+            return {row[0] for row in connection.execute('SELECT id FROM evidence WHERE task_id=?', (task_id,))}
+
+    def iter_current_evidence(self, task_id: str, revision: int, run_id: str):
+        cursor = None
+        while True:
+            params: list[Any] = [task_id, revision, run_id]
+            clause = ''
+            if cursor:
+                clause = ' AND (e.created_at,e.id) < (?,?)'
+                params.extend(cursor)
+            with self.connect() as connection:
+                rows = connection.execute(
+                    '''SELECT e.* FROM evidence e LEFT JOIN execution_runs r ON r.id=e.run_id
+                    WHERE e.task_id=? AND e.data_revision=?
+                    AND (e.run_id=? OR r.status IN ('completed','completed_with_warnings'))'''
+                    + clause + ' ORDER BY e.created_at DESC,e.id DESC LIMIT 32', params,
+                ).fetchall()
+            if not rows:
+                return
+            for row in rows:
+                yield self._evidence_record(row)
+            cursor = (rows[-1]['created_at'], rows[-1]['id'])
+
+    @staticmethod
+    def _evidence_record(row) -> EvidenceRecord:
+        return EvidenceRecord(
+            id=row['id'], task_id=row['task_id'], run_id=row['run_id'], title=row['title'], source=row['source'],
+            columns=json.loads(row['columns_json']), rows=json.loads(row['rows_json']),
+            created_at=row['created_at'], data_revision=row['data_revision'],
+            source_dataset_ids=json.loads(row['source_dataset_ids_json'] or '[]'),
+            source_revision_ids=json.loads(row['source_revision_ids_json'] or '[]'),
+            query=row['query'], query_hash=row['query_hash'],
         )
 
     def list_evidence(self, task_id: str) -> list[EvidenceRecord]:
@@ -1179,11 +1264,11 @@ class Repository(ReportRepositoryMixin):
                 (task_id,),
             ).fetchone()
         pending_run_id = pending["id"] if pending else None
+        parsed_datasets = [DatasetInfo.model_validate_json(d['catalog_json']) for d in datasets]
         saved_relationships = self.list_task_relationships(task_id)
         try:
-            from .dataset_retrieval import detect_dataset_relationships
-            detected = [DatasetRelationship.model_validate(item) for item in detect_dataset_relationships(
-                [DatasetInfo.model_validate_json(d["catalog_json"]) for d in datasets]
+            detected = [DatasetRelationship.model_validate_json(item) for item in _cached_relationships(
+                str(self.db_path.resolve()), task_id, tuple(d['catalog_json'] for d in datasets)
             )]
         except Exception:
             detected = []
@@ -1206,7 +1291,7 @@ class Repository(ReportRepositoryMixin):
                 sheet_count=f["sheet_count"], detected_sheet_count=f["detected_sheet_count"],
                 skipped_sheet_count=f["skipped_sheet_count"], row_count=f["row_count"], error=f["error"],
             ) for f in files],
-            datasets=[DatasetInfo.model_validate_json(d["catalog_json"]) for d in datasets],
+            datasets=parsed_datasets,
             relationships=relationships,
             messages=[MessageRecord(**dict(m)) for m in messages],
             result=AnalysisDraft.model_validate_json(task["result_json"]) if task["result_json"] else None,

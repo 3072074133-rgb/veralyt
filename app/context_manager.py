@@ -222,7 +222,7 @@ class ContextManager:
 
     @staticmethod
     def _evidence_ids(task_id: str) -> set[str]:
-        return {item.id for item in repository.list_evidence(task_id)}
+        return repository.evidence_ids(task_id)
 
     def _validate_evidence(self, task_id: str, memory: ConversationMemory) -> None:
         referenced = set(memory.referenced_evidence_ids)

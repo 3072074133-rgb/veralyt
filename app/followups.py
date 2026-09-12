@@ -27,21 +27,19 @@ def clearly_off_topic(question: str) -> bool:
 def eligible_evidence(state):
     revision = repository.get_run_by_id(state.run_id).data_revision
     dataset_ids = {d['id'] for d in state.datasets}
-    for evidence in reversed(repository.list_evidence(state.task_id)):
+    provenance = {}
+    for evidence in repository.iter_current_evidence(state.task_id, revision, state.run_id):
         if evidence.data_revision != revision or not evidence.source_dataset_ids:
             continue
         if not set(evidence.source_dataset_ids) <= dataset_ids:
             continue
-        current_sources = {revision_id for revision_id, _ in repository.source_revision_provenance(
-            state.task_id, evidence.source_dataset_ids)}
+        source_key = tuple(sorted(evidence.source_dataset_ids))
+        if source_key not in provenance:
+            provenance[source_key] = {revision_id for revision_id, _ in repository.source_revision_provenance(
+                state.task_id, evidence.source_dataset_ids)}
+        current_sources = provenance[source_key]
         if not current_sources or set(evidence.source_revision_ids) != current_sources:
             continue
-        if evidence.run_id != state.run_id:
-            if not evidence.run_id:
-                continue
-            run = repository.get_run_by_id(evidence.run_id)
-            if run.status not in {'completed', 'completed_with_warnings'}:
-                continue
         if {'报表', '项目', '口径', '金额'} <= set(evidence.columns):
             yield evidence
 

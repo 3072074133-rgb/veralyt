@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import MagicMock, Mock
 
 import pytest
 
@@ -12,7 +12,7 @@ def isolated(monkeypatch):
     tracker = Mock()
     tracker.complete.side_effect = lambda output: output
     monkeypatch.setattr(w, 'begin_node', lambda *args: tracker)
-    repo = Mock()
+    repo = MagicMock()
     repo.assert_run_context_current = Mock()
     monkeypatch.setattr(w, 'repository', repo)
     a = DatasetInfo(id='a', file_id='f', table_name='a', display_name='A', row_count=1, columns=[])

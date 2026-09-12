@@ -6,6 +6,7 @@ import sqlite3
 import json
 import logging
 import time
+from functools import wraps
 from typing import Any
 
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -640,6 +641,16 @@ def _latest_strategy_result(state: AnalysisState, strategy: str, *, metric: str 
                  and (metric is None or result.get('arguments', {}).get('metric') == metric)), None)
 
 
+def _with_evidence_scope(function):
+    @wraps(function)
+    def scoped(state: AnalysisState):
+        with repository.evidence_scope(state.task_id):
+            repository.list_evidence_by_ids(state.task_id, _current_evidence_ids(state))
+            return function(state)
+    return scoped
+
+
+@_with_evidence_scope
 def draft_node(state: AnalysisState) -> dict[str, Any]:
     repository.update_task(state.task_id, status=TaskStatus.EXECUTING, progress=70, status_message="正在整理分析结论")
     tracker = begin_node(state, "draft")
@@ -703,6 +714,7 @@ def draft_node(state: AnalysisState) -> dict[str, Any]:
         raise
 
 
+@_with_evidence_scope
 def validate_node(state: AnalysisState) -> dict[str, Any]:
     repository.update_task(state.task_id, status=TaskStatus.VALIDATING, progress=80, status_message="正在核对数字和证据引用")
     draft = AnalysisDraft.model_validate(state.draft)
@@ -787,6 +799,7 @@ def validate_node(state: AnalysisState) -> dict[str, Any]:
     return {"validation": report.model_dump(mode="json")}
 
 
+@_with_evidence_scope
 def reflect_node(state: AnalysisState) -> dict[str, Any]:
     revision_round = state.revision_round + 1
     repository.update_task(state.task_id, status=TaskStatus.REFLECTING, progress=88, status_message=f"正在进行第 {revision_round} 轮质量复核")
@@ -942,8 +955,7 @@ def _evidence_catalog(state: AnalysisState, *, row_limit: int = 100) -> list[dic
             "row_count": len(item.rows),
             "rows": _sample_rows(item.rows, row_limit),
         }
-        for item in repository.list_evidence(state.task_id)
-        if item.id in allowed
+        for item in repository.list_evidence_by_ids(state.task_id, allowed)
     ]
 
 
@@ -1199,7 +1211,7 @@ def _finalize_draft(state: AnalysisState, draft: AnalysisDraft) -> AnalysisDraft
     """Attach auditable calculations and apply deterministic chart policy."""
     normalized = _normalize_optional_metric_changes(draft, state.task_id)
     evidence_ids = _current_evidence_ids(state)
-    evidence = [item for item in repository.list_evidence(state.task_id) if item.id in evidence_ids]
+    evidence = repository.list_evidence_by_ids(state.task_id, evidence_ids)
     normalized = normalize_draft_charts(normalized, evidence, state.user_question)
     normalized.metrics = normalized.metrics[: settings.report_max_metrics]
     if not any(r.get('arguments', {}).get('strategy') == 'financial_report' for r in state.tool_results):
