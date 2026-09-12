@@ -11,7 +11,7 @@ from app.dataset_retrieval import (
     retrieve_datasets,
 )
 from app.llm import LLMContextOverflowError, LLMStructuredOutputError, OllamaGateway, _select_context
-from app.models import DatasetColumn, DatasetInfo, IntentDecision
+from app.models import DatasetColumn, DatasetInfo, IntentDecision, QueryRequest
 
 
 def _dataset(dataset_id: str, name: str, columns: list[DatasetColumn]) -> DatasetInfo:
@@ -64,7 +64,7 @@ def test_retrieval_prefers_table_covering_department_and_profit() -> None:
     assert compact[0]["matched_samples"]["Department"]
 
 
-def test_choose_tool_rejects_plain_text_instead_of_silent_fallback(
+def test_structured_query_rejects_plain_text_instead_of_silent_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     gateway = OllamaGateway()
@@ -76,8 +76,8 @@ def test_choose_tool_rejects_plain_text_instead_of_silent_fallback(
     )
     monkeypatch.setattr(gateway.client, "chat", lambda **_kwargs: response)
 
-    with pytest.raises(LLMStructuredOutputError, match="没有返回工具调用"):
-        gateway.choose_tool({}, [])
+    with pytest.raises(LLMStructuredOutputError):
+        gateway.structured('tool_orchestrator', {}, QueryRequest, thinking=False)
 
 
 def test_model_call_is_rejected_before_context_overflow(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -94,7 +94,7 @@ def test_model_call_is_rejected_before_context_overflow(monkeypatch: pytest.Monk
     monkeypatch.setattr(gateway.client, "chat", unexpected_call)
 
     with pytest.raises(LLMContextOverflowError):
-        gateway.choose_tool({"catalog": "x" * 5000}, [])
+        gateway.structured('tool_orchestrator', {"catalog": "x" * 5000}, QueryRequest, thinking=False)
     assert called is False
 
 

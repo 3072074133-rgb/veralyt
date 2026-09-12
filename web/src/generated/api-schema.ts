@@ -1383,6 +1383,19 @@ export interface components {
             started_at: string;
             /** Finished At */
             finished_at?: string | null;
+            /**
+             * Execution Mode
+             * @default unknown
+             * @enum {string}
+             */
+            execution_mode: "model" | "deterministic" | "unknown";
+            /**
+             * Prompt Replay Supported
+             * @default false
+             */
+            prompt_replay_supported: boolean;
+            /** Replay Unavailable Reason */
+            replay_unavailable_reason?: string | null;
             /** Input State */
             input_state: {
                 [key: string]: unknown;
@@ -1424,6 +1437,19 @@ export interface components {
             started_at: string;
             /** Finished At */
             finished_at?: string | null;
+            /**
+             * Execution Mode
+             * @default unknown
+             * @enum {string}
+             */
+            execution_mode: "model" | "deterministic" | "unknown";
+            /**
+             * Prompt Replay Supported
+             * @default false
+             */
+            prompt_replay_supported: boolean;
+            /** Replay Unavailable Reason */
+            replay_unavailable_reason?: string | null;
         };
         /** PromptVersion */
         PromptVersion: {

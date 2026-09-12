@@ -762,6 +762,9 @@ class NodeExecutionSummary(StrictModel):
     error: str | None = None
     started_at: str
     finished_at: str | None = None
+    execution_mode: Literal['model', 'deterministic', 'unknown'] = 'unknown'
+    prompt_replay_supported: bool = False
+    replay_unavailable_reason: str | None = None
 
 
 class NodeExecutionDetail(NodeExecutionSummary):

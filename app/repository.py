@@ -2274,12 +2274,26 @@ class Repository(ReportRepositoryMixin):
 
     @staticmethod
     def _node_summary(row: sqlite3.Row) -> NodeExecutionSummary:
+        diagnostics = json.loads(row['diagnostics_json'] or '{}')
+        mode = diagnostics.get('execution_mode', 'unknown')
+        if mode == 'unknown' and (diagnostics.get('model_request_attempt') or diagnostics.get('attempt')) and (
+            'prompt_eval_count' in diagnostics or 'response_content_chars' in diagnostics
+        ):
+            mode = 'model'
+        if mode not in {'model', 'deterministic', 'unknown'}:
+            mode = 'unknown'
+        supported = mode == 'model' and row['status'] == 'completed'
+        reason = None if supported else (
+            '纯程序节点不使用提示词，请重新发起分析以重新计算。' if mode == 'deterministic' else
+            '历史记录无法确认模型调用，节点仅供查看。' if mode == 'unknown' else '只能重跑已完成的模型节点。'
+        )
         prompt = PromptVersion(
             id=row["p_id"], node_name=row["p_node_name"], version=row["p_version"],
             content=row["p_content"], content_hash=row["p_content_hash"],
             parent_version_id=row["p_parent_version_id"], created_at=row["p_created_at"],
         )
         return NodeExecutionSummary(
+            execution_mode=mode, prompt_replay_supported=supported, replay_unavailable_reason=reason,
             id=row["id"], run_id=row["run_id"], node_name=row["node_name"],
             occurrence=row["occurrence"], prompt_version=prompt, status=row["status"],
             error=row["error"], started_at=row["started_at"], finished_at=row["finished_at"],

@@ -146,6 +146,8 @@ test('node replay drawer fits and exposes completed snapshots', async ({ page },
   await page.getByRole('button', { name: /草稿生成/ }).first().click()
   await expect(page.getByText('节点提示词')).toBeVisible()
   await expect(page.locator('.node-editor textarea')).toBeVisible()
+  await expect(page.locator('.node-editor textarea')).toHaveAttribute('readonly', '')
+  await expect(page.getByRole('button', { name: '保存新版本并重跑' })).toBeDisabled()
   await expect.poll(() => page.locator('.node-replay-drawer').evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
   await page.screenshot({ path: testInfo.outputPath('node-replay-drawer.png'), fullPage: true })
 })

@@ -459,6 +459,8 @@ async def replay_node(task_id: str, execution_id: str, request: ReplayNodeReques
         raise HTTPException(404, "节点快照不存在") from exc
     if source.status != "completed":
         raise HTTPException(409, "只能从已经完成的节点重新运行")
+    if not source.prompt_replay_supported:
+        raise HTTPException(409, source.replay_unavailable_reason)
     try:
         repository.assert_run_context_current(task_id, source.run_id)
     except ValueError as exc:

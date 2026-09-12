@@ -89,6 +89,7 @@ def test_completed_node_can_create_replay_branch(
         state.schema_version,
     )
     repository.finish_node_execution(execution_id, {"draft": result.model_dump(mode="json")})
+    repository.record_node_diagnostics(execution_id, {'execution_mode': 'model'})
 
     async def enqueue_noop(_run_id: str) -> None:
         return None
@@ -105,3 +106,28 @@ def test_completed_node_can_create_replay_branch(
     assert replay.parent_run_id == source_run
     assert replay.forked_from_node_execution_id == execution_id
     assert client.get(f"/api/v1/tasks/{task_id}/runs/{source_run}/nodes").json()[0]["node_name"] == "draft"
+
+
+@pytest.mark.parametrize('diagnostics,mode,supported', [
+    ({}, 'unknown', False),
+    ({'execution_mode': 'deterministic'}, 'deterministic', False),
+    ({'attempt': 1, 'prompt_eval_count': 20}, 'model', True),
+])
+def test_replay_capabilities_enforced_by_api(client, monkeypatch, diagnostics, mode, supported):
+    task = client.post('/api/v1/tasks').json()['id']
+    run = repository.start_execution(task, 'analysis')
+    prompt = repository.ensure_prompt_version('draft', '1', 'original prompt with enough characters')
+    node = repository.start_node_execution(run, 'draft', {}, prompt.id, {}, 3)
+    repository.record_node_diagnostics(node, diagnostics)
+    repository.finish_node_execution(node, {})
+    repository.finish_execution(run, 'completed')
+    repository.update_task(task, status='completed', progress=100)
+    async def noop(*args):
+        pass
+    monkeypatch.setattr(worker, 'enqueue_replay', noop)
+    detail = client.get(f'/api/v1/tasks/{task}/nodes/{node}').json()
+    assert detail['execution_mode'] == mode
+    assert detail['prompt_replay_supported'] is supported
+    response = client.post(f'/api/v1/tasks/{task}/nodes/{node}/replay',
+                           json={'prompt_content': 'a different prompt with enough characters'})
+    assert response.status_code == (202 if supported else 409)

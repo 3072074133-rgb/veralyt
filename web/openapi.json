@@ -3826,6 +3826,32 @@
             ],
             "title": "Finished At"
           },
+          "execution_mode": {
+            "type": "string",
+            "enum": [
+              "model",
+              "deterministic",
+              "unknown"
+            ],
+            "title": "Execution Mode",
+            "default": "unknown"
+          },
+          "prompt_replay_supported": {
+            "type": "boolean",
+            "title": "Prompt Replay Supported",
+            "default": false
+          },
+          "replay_unavailable_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replay Unavailable Reason"
+          },
           "input_state": {
             "additionalProperties": true,
             "type": "object",
@@ -3928,6 +3954,32 @@
               }
             ],
             "title": "Finished At"
+          },
+          "execution_mode": {
+            "type": "string",
+            "enum": [
+              "model",
+              "deterministic",
+              "unknown"
+            ],
+            "title": "Execution Mode",
+            "default": "unknown"
+          },
+          "prompt_replay_supported": {
+            "type": "boolean",
+            "title": "Prompt Replay Supported",
+            "default": false
+          },
+          "replay_unavailable_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replay Unavailable Reason"
           }
         },
         "additionalProperties": false,

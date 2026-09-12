@@ -31,11 +31,15 @@ class NodeExecutionTracker:
     task_id: str
     node_name: str
     started_at: float
+    execution_mode: str = 'deterministic'
 
     def record_diagnostics(self, diagnostics: dict[str, Any]) -> None:
+        if diagnostics.get('execution_mode') == 'model':
+            self.execution_mode = 'model'
         repository.record_node_diagnostics(self.execution_id, diagnostics)
 
     def complete(self, output: dict[str, Any]) -> dict[str, Any]:
+        self.record_diagnostics({'execution_mode': self.execution_mode})
         tracked = {**output, "prompt_versions": self.prompt_versions}
         repository.finish_node_execution(self.execution_id, tracked)
         repository.touch_execution(self.run_id)
@@ -52,6 +56,7 @@ class NodeExecutionTracker:
         return tracked
 
     def fail(self, error: Exception) -> None:
+        self.record_diagnostics({'execution_mode': self.execution_mode})
         repository.finish_node_execution(self.execution_id, None, error=str(error))
         repository.touch_execution(self.run_id)
         logger.exception(
@@ -105,6 +110,10 @@ def begin_node(state: AnalysisState, node_name: str) -> NodeExecutionTracker:
         },
         state.schema_version,
     )
+    repository.record_node_diagnostics(execution_id, {
+        'input_state_chars': len(state.model_dump_json()),
+        'execution_mode': 'deterministic',
+    })
     log_event(
         logger,
         "workflow.node.started",

@@ -21,7 +21,7 @@ let previousFocus: HTMLElement | null = null
 const selectedRun = computed(() => runs.value.find((item) => item.id === selectedRunId.value))
 const canActivateSelected = computed(() => !!selectedRun.value && ['completed', 'completed_with_warnings'].includes(selectedRun.value.status))
 const changed = computed(() => !!selectedNode.value && promptContent.value.trim() !== selectedNode.value.prompt_version.content.trim())
-const canReplay = computed(() => changed.value && promptContent.value.trim().length >= 20 && !props.running && !submitting.value)
+const canReplay = computed(() => selectedNode.value?.prompt_replay_supported && changed.value && promptContent.value.trim().length >= 20 && !props.running && !submitting.value)
 const downstream = computed(() => {
   const names: Record<string, string[]> = {
     classify: ['意图分类', '分析计划', '工具调度', '草稿生成', '校验', '反思复核'],
@@ -138,7 +138,8 @@ function pretty(value: unknown) { return JSON.stringify(value, null, 2) }
 
         <section v-if="selectedNode" class="node-editor">
           <header><div><h3>{{ nodeLabel(selectedNode) }}</h3><p>{{ formatTime(selectedNode.started_at) }} · 状态模型 v{{ selectedNode.state_schema_version }}</p></div><code>{{ selectedNode.prompt_version.content_hash.slice(0, 12) }}</code></header>
-          <label><span>节点提示词</span><textarea v-model="promptContent" spellcheck="false" /></label>
+          <label><span>节点提示词</span><textarea v-model="promptContent" :readonly="!selectedNode.prompt_replay_supported" spellcheck="false" /></label>
+          <p v-if="selectedNode.replay_unavailable_reason">{{ selectedNode.replay_unavailable_reason }}</p>
           <div class="replay-impact"><strong>重新执行范围</strong><span>{{ downstream }}</span></div>
           <div class="editor-actions"><span v-if="!changed">提示词未修改</span><button class="button primary" :disabled="!canReplay" @click="replay"><RotateCcw :size="16" />保存新版本并重跑</button></div>
           <details><summary>节点输入快照</summary><pre>{{ pretty(selectedNode.input_state) }}</pre></details>
