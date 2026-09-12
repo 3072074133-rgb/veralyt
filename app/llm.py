@@ -339,7 +339,7 @@ def _ollama_schema(value: Any) -> Any:
             replacement = non_null[0]
             cleaned.pop("anyOf")
             cleaned.update(replacement)
-    if cleaned.get("type") == "object" and isinstance(cleaned.get("properties"), dict):
-        # Ollama 0.21's grammar builder crashes on optional object properties.
-        cleaned["required"] = list(cleaned["properties"])
+    # Keep the model's required/optional distinction. Older code promoted every
+    # property to required, which made otherwise valid partial plans impossible
+    # for small local models to emit. Pydantic remains the final validator.
     return cleaned
