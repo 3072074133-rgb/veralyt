@@ -1648,9 +1648,30 @@ def _format_number(value: float | None) -> str:
     return f"{value:.12g}"
 
 
+def prepare_context_node(state: AnalysisState) -> dict[str, Any]:
+    if state.context_prepared or (state.intent or {}).get('route') in {'derived_metric', 'clarification'}:
+        return {}
+    started_at = time.perf_counter()
+    run = repository.get_run_by_id(state.run_id)
+    snapshot = repository.get_task(state.task_id)
+    messages = [item for item in snapshot.messages if item.sequence <= run.message_sequence]
+    conversation, _budget = context_manager.prepare(
+        state.task_id, messages, current_question=state.user_question,
+        dynamic_context={'datasets': [
+            {key: item.get(key) for key in ('id', 'display_name', 'row_count')} for item in state.datasets
+        ]},
+    )
+    knowledge = [item.model_dump(mode='json') for item in retrieve_for_run(state.run_id, state.user_question)]
+    log_event(logger, 'workflow.context.prepared', task_id=state.task_id, run_id=state.run_id,
+              duration_ms=duration_ms(started_at), knowledge_match_count=len(knowledge))
+    return {'conversation_summary': conversation.model_dump(mode='json'),
+            'knowledge_context': knowledge, 'context_prepared': True}
+
+
 def build_graph():
     builder = StateGraph(AnalysisState)
     builder.add_node("classify", classify_node)
+    builder.add_node("prepare_context", prepare_context_node)
     builder.add_node("off_topic", off_topic_node)
     builder.add_node("plan", plan_node)
     builder.add_node("clarify", clarify_node)
@@ -1664,7 +1685,8 @@ def build_graph():
         lambda state: state.entry_node,
         {"classify": "classify", "plan": "plan", "execute": "execute", "draft": "draft", "reflect": "reflect"},
     )
-    builder.add_conditional_edges("classify", route_intent, {"plan": "plan", "off_topic": "off_topic"})
+    builder.add_conditional_edges("classify", route_intent, {"plan": "prepare_context", "off_topic": "off_topic"})
+    builder.add_edge("prepare_context", "plan")
     builder.add_edge("off_topic", END)
     builder.add_conditional_edges("plan", route_plan, {"execute": "execute", "clarify": "clarify"})
     builder.add_edge("clarify", END)
@@ -1707,26 +1729,7 @@ def run_analysis(run_id: str) -> None:
         return
     messages = [item for item in snapshot.messages if item.sequence <= run.message_sequence]
     try:
-        conversation, _budget = context_manager.prepare(
-            task_id,
-            messages,
-            current_question=question,
-            dynamic_context={
-                "dataset_count": len(snapshot.datasets),
-                "datasets": [
-                    {
-                        "id": item.id,
-                        "display_name": item.display_name,
-                        "row_count": item.row_count,
-                        "field_count": len(item.columns),
-                    }
-                    for item in snapshot.datasets
-                ],
-            },
-        )
-        knowledge_context = [
-            item.model_dump(mode="json") for item in retrieve_for_run(run_id, question)
-        ]
+        conversation = context_manager.classification_context(task_id, messages, current_question=question)
         initial = AnalysisState(
             task_id=task_id,
             run_id=run_id,
@@ -1734,8 +1737,9 @@ def run_analysis(run_id: str) -> None:
             conversation_summary=conversation.model_dump(mode="json"),
             datasets=[item.model_dump(mode="json") for item in snapshot.datasets],
             confirmed_relationships=[item.model_dump(mode="json") for item in snapshot.relationships if item.status == "confirmed"],
-            knowledge_context=knowledge_context,
         )
+        if not settings.model_intent_enabled:
+            initial = initial.model_copy(update=prepare_context_node(initial))
         result = graph.invoke(initial, config={"configurable": {"thread_id": run_id}})
         final_status = str(result.get("final_status") or repository.get_task(task_id).status.value)
         has_draft = final_status in {
@@ -1802,6 +1806,9 @@ def run_replay(run_id: str) -> None:
         }
     )
     state = AnalysisState.model_validate(payload)
+    if source.node_name == 'classify':
+        state.context_prepared = False
+        state.knowledge_context = []
     if not repository.mark_execution_running(run.id):
         return
     repository.update_task(

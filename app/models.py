@@ -790,6 +790,7 @@ class AnalysisState(StrictModel):
     is_replay: bool = False
     prompt_versions: dict[str, str] = Field(default_factory=dict)
     conversation_summary: dict[str, Any] | None = None
+    context_prepared: bool = False
     datasets: list[dict[str, Any]] = Field(default_factory=list)
     confirmed_relationships: list[dict[str, Any]] = Field(default_factory=list)
     knowledge_context: list[dict[str, Any]] = Field(default_factory=list)

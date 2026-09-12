@@ -64,7 +64,8 @@ def test_long_conversation_compacts_and_preserves_recent_messages(
     _add_dialogue(memory_repo, 30, width=10)
     calls: list[list[dict]] = []
 
-    def summarize(_prompt, payload, _model, *, thinking):
+    def summarize(_prompt, payload, _model, *, thinking, max_attempts):
+        assert max_attempts == 1
         calls.append(payload["messages_to_merge"])
         previous = payload["previous_memory"] or {}
         return ConversationMemory(
@@ -116,7 +117,7 @@ def test_invalid_evidence_keeps_previous_memory_and_analysis_can_continue(
     assert any(item.event_type == "conversation.compaction_failed" for item in events)
 
 
-def test_existing_memory_uses_local_trim_instead_of_summary_model(
+def test_existing_memory_merges_uncovered_messages_with_bounded_requests(
     memory_repo: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -129,10 +130,12 @@ def test_existing_memory_uses_local_trim_instead_of_summary_model(
         expected_version=None,
     )
 
-    def unexpected_call(*args, **kwargs):
-        raise AssertionError("existing memory should be trimmed locally")
+    calls = []
+    def summarize(_prompt, payload, _model, **kwargs):
+        calls.append(payload)
+        return ConversationMemory.model_validate(payload['previous_memory'])
 
-    monkeypatch.setattr("app.context_manager.llm.structured", unexpected_call)
+    monkeypatch.setattr("app.context_manager.llm.structured", summarize)
     snapshot = repository.get_task(memory_repo)
     context, budget = ContextManager().prepare(
         memory_repo,
@@ -144,6 +147,8 @@ def test_existing_memory_uses_local_trim_instead_of_summary_model(
     assert context.memory is not None
     assert context.memory.task_goal == "分析报表，统计各部门盈亏"
     assert budget.compacted is True
+    assert 1 <= len(calls) <= 2
+    assert repository.get_conversation_memory(memory_repo).covered_until_sequence > 0
     assert len(context.recent_messages) < len(snapshot.messages)
 
 
@@ -179,9 +184,11 @@ def test_persisted_cursor_prevents_reprocessing_after_restart(
     _add_dialogue(memory_repo, 12, width=10)
     calls = 0
 
-    def summarize(_prompt, payload, _model, *, thinking):
+    batches = []
+    def summarize(_prompt, payload, _model, *, thinking, max_attempts):
         nonlocal calls
         calls += 1
+        batches.append([item['sequence'] for item in payload['messages_to_merge']])
         return ConversationMemory(task_goal="分析收入")
 
     monkeypatch.setattr("app.context_manager.llm.structured", summarize)
@@ -194,7 +201,22 @@ def test_persisted_cursor_prevents_reprocessing_after_restart(
     second_record = repository.get_conversation_memory(memory_repo)
 
     assert first_calls > 0
-    assert calls == first_calls
     assert second_record is not None and first_record is not None
-    assert second_record.version == first_record.version
-    assert second_record.covered_until_sequence == first_record.covered_until_sequence
+    assert calls - first_calls <= 2
+    assert all(sequence > first_record.covered_until_sequence for batch in batches[first_calls:] for sequence in batch)
+    assert second_record.covered_until_sequence >= first_record.covered_until_sequence
+
+
+def test_summary_failure_does_not_advance_existing_cursor(memory_repo, monkeypatch):
+    _small_budget(monkeypatch)
+    _add_dialogue(memory_repo, 20, width=20)
+    previous = repository.save_conversation_memory(memory_repo, ConversationMemory(task_goal='retained'), 0, expected_version=None)
+    calls = []
+    def fail(*args, **kwargs):
+        calls.append(1)
+        raise ValueError('invalid summary')
+    monkeypatch.setattr('app.context_manager.llm.structured', fail)
+    ContextManager().prepare(memory_repo, repository.get_task(memory_repo).messages, current_question='next')
+    current = repository.get_conversation_memory(memory_repo)
+    assert len(calls) == 2
+    assert current == previous

@@ -26,6 +26,11 @@ class ContextBudget:
 
 
 class ContextManager:
+    def classification_context(self, task_id: str, messages: list[MessageRecord], *, current_question: str) -> ConversationContext:
+        record = repository.get_conversation_memory(task_id)
+        history = self._without_current_question(messages, current_question)
+        return ConversationContext(memory=record.memory if record else None, recent_messages=history[-4:])
+
     def prepare(
         self,
         task_id: str,
@@ -43,16 +48,8 @@ class ContextManager:
         available = self._available_message_tokens(dynamic_context)
         compacted = False
 
-        if memory is not None and self._context_tokens(memory, unsummarized) > available:
-            recent = self._fit_messages(unsummarized, memory, available)
-            return ConversationContext(memory=memory, recent_messages=recent), ContextBudget(
-                input_tokens=settings.context_base_overhead_tokens + self._context_tokens(memory, recent),
-                message_tokens=self._context_tokens(memory, recent),
-                available_message_tokens=available,
-                compacted=len(recent) < len(unsummarized),
-            )
-
-        while self._context_tokens(memory, unsummarized) > available:
+        requests = 0
+        while requests < 2 and self._context_tokens(memory, unsummarized) > available:
             candidates = unsummarized[:-settings.context_recent_messages]
             if not candidates:
                 break
@@ -62,8 +59,9 @@ class ContextManager:
             self._emit(task_id, "conversation.compacting", "正在整理较长会话")
             updated: ConversationMemory | None = None
             last_error: Exception | None = None
-            while batch:
+            while batch and requests < 2:
                 try:
+                    requests += 1
                     updated = llm.structured(
                         "conversation_summarizer",
                         {
@@ -73,6 +71,7 @@ class ContextManager:
                         },
                         ConversationMemory,
                         thinking=False,
+                        max_attempts=1,
                     )
                     self._validate_evidence(task_id, updated)
                     break

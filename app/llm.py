@@ -73,6 +73,7 @@ class OllamaGateway:
         ignored_response_fields: set[str] | None = None,
         fallback_contexts: list[dict[str, Any]] | None = None,
         diagnostics: Callable[[dict[str, Any]], None] | None = None,
+        max_attempts: int = 2,
     ) -> ModelT:
         prompt = prompt_override or self.load_prompt(prompt_name)
         schema = _ollama_schema(response_model.model_json_schema())
@@ -88,7 +89,7 @@ class OllamaGateway:
         ]
         _record_diagnostics(diagnostics, _selection_diagnostics(selection))
         last_error: Exception | None = None
-        for attempt in range(2):
+        for attempt in range(max_attempts):
             if attempt:
                 if isinstance(last_error, ValidationError):
                     detail = '; '.join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in last_error.errors()[:4])
@@ -168,7 +169,7 @@ class OllamaGateway:
                     extra={"event_fields": {"event": "llm.request.failed", "prompt_name": prompt_name, "model": settings.ollama_model, "attempt": attempt + 1, "duration_ms": duration_ms(started_at)}},
                 )
                 raise LLMUnavailableError(f"无法连接本地模型 {settings.ollama_model}：{exc}") from exc
-        raise LLMStructuredOutputError(f"模型结构化输出连续两次校验失败：{last_error}")
+        raise LLMStructuredOutputError(f"模型结构化输出连续 {max_attempts} 次校验失败：{last_error}")
 
     def choose_tool(
         self,
