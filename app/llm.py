@@ -62,6 +62,16 @@ class OllamaGateway:
         self.client = Client(host=settings.ollama_host, trust_env=False, timeout=180)
         self.prompt_dir = PROJECT_ROOT / "prompts"
 
+    def load_prompt(self, name: str) -> str:
+        path = self.prompt_dir / f"{name}.md"
+        text = path.read_text(encoding="utf-8")
+        return re.sub(r"^---\s*.*?\s*---\s*", "", text, count=1, flags=re.DOTALL)
+
+    def prompt_version(self, name: str) -> str:
+        text = (self.prompt_dir / f"{name}.md").read_text(encoding="utf-8")
+        match = re.search(r"^prompt_version:\s*([^\r\n]+)", text, flags=re.MULTILINE)
+        return match.group(1).strip() if match else "file"
+
     def structured(
         self,
         prompt_name: str,
@@ -125,9 +135,7 @@ class OllamaGateway:
                     ),
                 )
                 content = response.message.content.strip()
-                if content.startswith('```') and content.endswith('```'):
-                    content = re.sub(r'^```(?:json)?\s*|\s*```$', '', content)
-                payload = json.loads(content)
+                payload = _extract_json_payload(content)
                 wrapper_names = {response_model.__name__, re.sub(r'(?<!^)(?=[A-Z])', '_', response_model.__name__).lower()}
                 if isinstance(payload, dict) and len(payload) == 1 and next(iter(payload)) in wrapper_names:
                     wrapped = next(iter(payload.values()))
@@ -173,15 +181,37 @@ class OllamaGateway:
         raise LLMStructuredOutputError(f"模型结构化输出连续 {max_attempts} 次校验失败：{last_error}")
 
 
-    def load_prompt(self, name: str) -> str:
-        path = self.prompt_dir / f"{name}.md"
-        text = path.read_text(encoding="utf-8")
-        return re.sub(r"^---\s*.*?\s*---\s*", "", text, count=1, flags=re.DOTALL)
-
-    def prompt_version(self, name: str) -> str:
-        text = (self.prompt_dir / f"{name}.md").read_text(encoding="utf-8")
-        match = re.search(r"^prompt_version:\s*([^\r\n]+)", text, flags=re.MULTILINE)
-        return match.group(1).strip() if match else "file"
+def _extract_json_payload(content: str) -> Any:
+    """Accept fenced/wrapped JSON while still validating the resulting object."""
+    candidate = re.sub(r"```(?:json)?\s*|\s*```", "", content, flags=re.IGNORECASE).strip()
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        starts = [index for index, char in enumerate(candidate) if char in "[{]"]
+        for start in starts:
+            opening, closing = candidate[start], '}' if candidate[start] == '{' else ']'
+            depth = 0
+            in_string = False
+            escaped = False
+            for index in range(start, len(candidate)):
+                char = candidate[index]
+                if in_string:
+                    if escaped:
+                        escaped = False
+                    elif char == '\\':
+                        escaped = True
+                    elif char == '"':
+                        in_string = False
+                    continue
+                if char == '"':
+                    in_string = True
+                elif char == opening:
+                    depth += 1
+                elif char == closing:
+                    depth -= 1
+                    if depth == 0:
+                        return json.loads(candidate[start:index + 1])
+        raise
 
 
 llm = OllamaGateway()

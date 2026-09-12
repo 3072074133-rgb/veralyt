@@ -328,10 +328,9 @@ def plan_node(state: AnalysisState) -> dict[str, Any]:
                 "completed_step_ids": state.completed_step_ids,
                 "revision_feedback": _revision_feedback(state),
             }
-            plan = llm.structured(
-                "analysis_planner",
-                plan_context,
-                AnalysisPlan,
+            try:
+                plan = llm.structured(
+                    "analysis_planner", plan_context, AnalysisPlan,
                 thinking=False,
                 prompt_override=tracker.prompt.content,
                 fallback_contexts=[
@@ -348,8 +347,18 @@ def plan_node(state: AnalysisState) -> dict[str, Any]:
                         ),
                     },
                 ],
-                diagnostics=tracker.record_diagnostics,
-            )
+                    diagnostics=tracker.record_diagnostics,
+                )
+            except LLMStructuredOutputError as exc:
+                tracker.record_diagnostics({"planner_fallback": "minimal_deterministic", "planner_error": str(exc)})
+                viable = next((item for item in matches if _has_named_measure(item.dataset)), None)
+                if viable is None:
+                    plan = AnalysisPlan(goal="确认分析指标", can_execute=False,
+                        clarification_question="模型计划格式无法解析，请明确要统计的指标或字段名称。")
+                else:
+                    plan = AnalysisPlan(goal="生成基础数据概览", can_execute=True, steps=[PlanStep(
+                        id="fallback_overview", purpose="汇总主要金额指标并提取可复核证据",
+                        tool="auto_analyze", dataset_id=viable.dataset.id)])
         plan = _normalize_plan_for_request(plan, state.user_question)
         plan = _bind_plan_datasets(plan, matches, state.confirmed_relationships)
         if plan.can_execute and not plan.steps:
