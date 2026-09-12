@@ -383,8 +383,7 @@ def plan_node(state: AnalysisState) -> dict[str, Any]:
                 )
             else:
                 overview_matches = [match for match in matches if _has_named_measure(match.dataset)][:3]
-                plan = _normalize_plan_for_request(
-                    AnalysisPlan(
+                plan = AnalysisPlan(
                         goal="生成数据概览",
                         can_execute=True,
                         steps=[PlanStep(
@@ -393,8 +392,6 @@ def plan_node(state: AnalysisState) -> dict[str, Any]:
                             tool="auto_analyze",
                             dataset_id=match.dataset.id,
                         ) for index, match in enumerate(overview_matches)],
-                    ),
-                    state.user_question,
                 )
             tracker.record_diagnostics({"planning_source": "deterministic_overview"})
         else:
@@ -626,13 +623,6 @@ def execute_node(state: AnalysisState) -> dict[str, Any]:
             result.evidence_ids,
         )
         completed = list(dict.fromkeys([*state.completed_step_ids, pending_step.id]))
-        if name == "query_data" and "ORDER BY" in str(result.arguments.get("sql", "")).upper():
-            completed.extend(
-                step.id
-                for step in plan.steps
-                if step.id not in completed and _is_sort_only_step(step)
-            )
-            completed = list(dict.fromkeys(completed))
         return tracker.complete({
             "tool_results": [*state.tool_results, result.model_dump(mode="json")],
             "tool_call_count": state.tool_call_count + 1,
@@ -643,15 +633,22 @@ def execute_node(state: AnalysisState) -> dict[str, Any]:
         raise
 
 
+def _latest_strategy_result(state: AnalysisState, strategy: str, *, metric: str | None = None) -> dict[str, Any] | None:
+    return next((result for result in reversed(state.tool_results)
+                 if result.get('status') == 'success'
+                 and result.get('arguments', {}).get('strategy') == strategy
+                 and (metric is None or result.get('arguments', {}).get('metric') == metric)), None)
+
+
 def draft_node(state: AnalysisState) -> dict[str, Any]:
     repository.update_task(state.task_id, status=TaskStatus.EXECUTING, progress=70, status_message="正在整理分析结论")
     tracker = begin_node(state, "draft")
     try:
-        overdue_result = next((r for r in state.tool_results if r.get('arguments', {}).get('strategy') == 'overdue_ranking'), None)
+        overdue_result = _latest_strategy_result(state, 'overdue_ranking')
         if overdue_result:
-            return tracker.complete({'draft': _finalize_draft(state, overdue_draft(overdue_result)).model_dump(mode='json')})
+            return tracker.complete({'draft': _finalize_draft(state, overdue_draft(overdue_result)).model_dump(mode='json'), 'draft_execution_mode': 'deterministic'})
         if (state.intent or {}).get('route') == 'derived_metric':
-            result = next((r for r in state.tool_results if r.get('arguments', {}).get('strategy') == 'derived_metric'), None)
+            result = _latest_strategy_result(state, 'derived_metric', metric=state.intent['metric'])
             if result is None:
                 calculated, reason = calculate_metric(state, state.intent['metric'])
                 if calculated is None:
@@ -659,20 +656,20 @@ def draft_node(state: AnalysisState) -> dict[str, Any]:
                 result = calculated.model_dump(mode='json')
                 state.tool_results = [*state.tool_results, result]
             draft = _finalize_draft(state, metric_draft(result))
-            return tracker.complete({'draft': draft.model_dump(mode='json'), 'tool_results': state.tool_results})
+            return tracker.complete({'draft': draft.model_dump(mode='json'), 'tool_results': state.tool_results, 'draft_execution_mode': 'deterministic'})
         financial_result = next((r for r in reversed(state.tool_results)
                                  if r.get('status') == 'success' and
                                  r.get('arguments', {}).get('strategy') == 'financial_report'), None)
         if financial_result:
             draft = _finalize_draft(state, financial_draft(financial_result))
-            return tracker.complete({'draft': draft.model_dump(mode='json')})
+            return tracker.complete({'draft': draft.model_dump(mode='json'), 'draft_execution_mode': 'deterministic'})
         if _uses_sectioned_department_profit_result(state):
             department_profit = _department_profit_draft(state)
             if department_profit is not None:
                 department_profit = _finalize_draft(state, department_profit)
                 _publish_chart_artifacts(state, department_profit)
                 tracker.record_diagnostics({"draft_source": "deterministic_department_profit"})
-                return tracker.complete({"draft": department_profit.model_dump(mode="json")})
+                return tracker.complete({"draft": department_profit.model_dump(mode="json"), "draft_execution_mode": "deterministic"})
         if _is_generic_analysis_request(state.user_question):
             overview = _generic_overview_draft(state)
             if overview is not None:
@@ -682,7 +679,7 @@ def draft_node(state: AnalysisState) -> dict[str, Any]:
                         item.evidence_pointers = []
                 overview = _finalize_draft(state, overview)
                 _publish_chart_artifacts(state, overview)
-                return tracker.complete({"draft": overview.model_dump(mode="json")})
+                return tracker.complete({"draft": overview.model_dump(mode="json"), "draft_execution_mode": "deterministic"})
         draft_context = _draft_context(state, row_limit=12)
         generated_draft = llm.structured(
             "draft_writer",
@@ -698,12 +695,9 @@ def draft_node(state: AnalysisState) -> dict[str, Any]:
             diagnostics=tracker.record_diagnostics,
         )
         draft = AnalysisDraft.model_validate(generated_draft.model_dump(mode="json"))
-        draft = _normalize_optional_metric_changes(draft, state.task_id)
-        if _is_generic_analysis_request(state.user_question):
-            draft = _generic_overview_draft(state) or draft
         draft = _finalize_draft(state, draft)
         _publish_chart_artifacts(state, draft)
-        return tracker.complete({"draft": draft.model_dump(mode="json")})
+        return tracker.complete({"draft": draft.model_dump(mode="json"), "draft_execution_mode": "model"})
     except Exception as exc:
         tracker.fail(exc)
         raise
@@ -802,7 +796,7 @@ def reflect_node(state: AnalysisState) -> dict[str, Any]:
         if not validation.passed:
             previous_issues = (state.reflection or {}).get('issues', [])
             unchanged = {i.get('problem') for i in previous_issues} == {i.message for i in validation.issues}
-            route = 'finish' if unchanged and previous_issues else 'rewrite'
+            route = 'finish' if state.draft_execution_mode == 'deterministic' or (unchanged and previous_issues) else 'rewrite'
             return tracker.complete({
                 "reflection": ReflectionDecision(
                     verdict="revise",
@@ -1118,6 +1112,8 @@ def _is_generic_analysis_request(question: str) -> bool:
 
 
 def _normalize_plan_for_request(plan: AnalysisPlan, question: str) -> AnalysisPlan:
+    if not plan.can_execute:
+        return plan
     if any(step.id == 'financial_report' for step in plan.steps):
         return plan
     if not _is_generic_analysis_request(question):
@@ -1677,6 +1673,12 @@ def build_graph():
 graph = build_graph()
 
 
+def _should_auto_activate(result: dict[str, Any], final_status: str) -> bool:
+    return final_status in {TaskStatus.COMPLETED.value, TaskStatus.COMPLETED_WITH_WARNINGS.value} and (
+        (result.get('intent') or {}).get('route') not in {'derived_metric', 'explanation'}
+    )
+
+
 def run_analysis(run_id: str) -> None:
     started_at = time.perf_counter()
     run = repository.get_run_by_id(run_id)
@@ -1730,12 +1732,7 @@ def run_analysis(run_id: str) -> None:
             TaskStatus.NEEDS_REVIEW.value,
         }
         draft = AnalysisDraft.model_validate(result["draft"]) if has_draft else None
-        activate = final_status in {
-            TaskStatus.COMPLETED.value,
-            TaskStatus.COMPLETED_WITH_WARNINGS.value,
-        }
-        if (result.get('intent') or {}).get('route') in {'derived_metric', 'explanation'}:
-            activate = False
+        activate = _should_auto_activate(result, final_status)
         repository.finish_execution(run_id, final_status, result.get("error"), draft, activate=activate)
         log_event(
             logger,
@@ -1813,12 +1810,9 @@ def run_replay(run_id: str) -> None:
             TaskStatus.NEEDS_REVIEW.value,
         }
         draft = AnalysisDraft.model_validate(result["draft"]) if has_draft else None
-        activate = final_status in {
-            TaskStatus.COMPLETED.value,
-            TaskStatus.COMPLETED_WITH_WARNINGS.value,
-        }
+        activate = _should_auto_activate(result, final_status)
         repository.finish_execution(run.id, final_status, result.get("error"), draft, activate=activate)
-        if not activate:
+        if final_status in {TaskStatus.FAILED.value, TaskStatus.OFF_TOPIC.value, TaskStatus.NEEDS_CLARIFICATION.value}:
             repository.restore_active_run_after_failure(
                 run.task_id, run.id, result.get("error") or f"重跑终止状态：{final_status}"
             )

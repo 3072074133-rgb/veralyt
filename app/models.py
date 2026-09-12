@@ -801,6 +801,7 @@ class AnalysisState(StrictModel):
     tool_call_count: int = 0
     step_attempts: dict[str, int] = Field(default_factory=dict)
     draft: dict[str, Any] | None = None
+    draft_execution_mode: Literal["model", "deterministic", "unknown"] = "unknown"
     validation: dict[str, Any] | None = None
     reflection: dict[str, Any] | None = None
     revision_round: int = 0

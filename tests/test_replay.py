@@ -177,7 +177,7 @@ def test_generic_report_request_uses_local_plan_without_model(
         table_name="data_1",
         display_name="经营报表",
         row_count=2,
-        columns=[DatasetColumn(name="Amount", display_name="金额", data_type="Float64", null_count=0)],
+        columns=[DatasetColumn(name="Amount", display_name="金额", data_type="Float64", null_count=0, role="measure")],
     )
     state = AnalysisState(
         task_id=replay_repo,
