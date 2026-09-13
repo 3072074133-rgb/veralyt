@@ -6,15 +6,16 @@ from .config import settings
 from .followups import clearly_off_topic, requested_metric
 from .llm import LLMStructuredOutputError, llm
 from .models import AnalysisState, IntentDecision, TaskStatus
-from .node_runtime import begin_node
+from .node_logging import start_node
 from .repository import repository
 
 
 def classify_legacy(state: AnalysisState) -> dict[str, Any]:
     from .workflow import _has_clear_analysis_intent, _is_generic_analysis_request, _is_retry_analysis_request, _previous_analysis_question
+    from .workflow_nodes.rules import has_explicit_query_action, is_contextual_followup
 
     repository.update_task(state.task_id, status=TaskStatus.CLASSIFYING, progress=20, status_message="正在判断分析需求")
-    tracker = begin_node(state, "classify")
+    tracker = start_node(state, "classify")
     try:
         question = state.user_question
         if settings.followup_enabled and clearly_off_topic(question):
@@ -45,6 +46,13 @@ def classify_legacy(state: AnalysisState) -> dict[str, Any]:
                 "user_question": resolved,
             })
 
+        if is_contextual_followup(question, bool(state.previous_result)):
+            route = "analysis" if has_explicit_query_action(question) else "explanation"
+            return tracker.complete({'intent': IntentDecision(
+                is_analysis=True, route=route,
+                reason='基于上一轮结果继续回答当前追问。', confidence=1,
+            ).model_dump(mode='json')})
+
         if _has_clear_analysis_intent(question, bool(state.datasets)):
             resolved = _previous_analysis_question(state) if _is_generic_analysis_request(question) else None
             decision = IntentDecision(
@@ -72,6 +80,11 @@ def classify_legacy(state: AnalysisState) -> dict[str, Any]:
                 diagnostics=tracker.record_diagnostics,
             )
         except LLMStructuredOutputError as exc:
+            if is_contextual_followup(question, bool(state.previous_result)):
+                return tracker.complete({'intent': IntentDecision(
+                    is_analysis=True, route='explanation',
+                    reason='模型输出异常，基于上一轮结果继续回答。', confidence=0,
+                ).model_dump(mode='json')})
             if not _has_clear_analysis_intent(question, bool(state.datasets)):
                 return tracker.complete({'intent': IntentDecision(is_analysis=True, route='clarification',
                     reason='本次问题未能可靠识别，请明确要查询的指标或问题', confidence=0,

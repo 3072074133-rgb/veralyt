@@ -26,9 +26,6 @@ from .models import (
     DatasetRelationship,
     EvidenceRecord,
     MessageRecord,
-    NodeExecutionDetail,
-    NodeExecutionSummary,
-    PromptVersion,
     ReportJob,
     ReportSummary,
     ReportVersion,
@@ -131,9 +128,7 @@ CREATE TABLE IF NOT EXISTS execution_runs (
     started_at TEXT NOT NULL,
     finished_at TEXT,
     parent_run_id TEXT,
-    forked_from_node_execution_id TEXT,
     entry_node TEXT NOT NULL DEFAULT 'classify',
-    prompt_version_id TEXT,
     result_json TEXT,
     is_active INTEGER NOT NULL DEFAULT 0,
     data_revision INTEGER NOT NULL DEFAULT 0,
@@ -141,33 +136,6 @@ CREATE TABLE IF NOT EXISTS execution_runs (
     claimed_at TEXT,
     heartbeat_at TEXT,
     attempt_count INTEGER NOT NULL DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS prompt_versions (
-    id TEXT PRIMARY KEY,
-    node_name TEXT NOT NULL,
-    version TEXT NOT NULL,
-    content TEXT NOT NULL,
-    content_hash TEXT NOT NULL,
-    parent_version_id TEXT REFERENCES prompt_versions(id),
-    created_at TEXT NOT NULL,
-    UNIQUE(node_name, content_hash)
-);
-CREATE TABLE IF NOT EXISTS node_executions (
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL REFERENCES execution_runs(id) ON DELETE CASCADE,
-    node_name TEXT NOT NULL,
-    occurrence INTEGER NOT NULL,
-    input_state_json TEXT NOT NULL,
-    output_state_json TEXT,
-    state_schema_version INTEGER NOT NULL,
-    prompt_version_id TEXT NOT NULL REFERENCES prompt_versions(id),
-    model_config_json TEXT NOT NULL,
-    status TEXT NOT NULL,
-    error TEXT,
-    started_at TEXT NOT NULL,
-    finished_at TEXT,
-    diagnostics_json TEXT NOT NULL DEFAULT '{}',
-    UNIQUE(run_id, node_name, occurrence)
 );
 CREATE TABLE IF NOT EXISTS exports (
     id TEXT PRIMARY KEY,
@@ -179,7 +147,6 @@ CREATE TABLE IF NOT EXISTS exports (
 );
 CREATE INDEX IF NOT EXISTS ix_tasks_updated ON tasks(updated_at DESC);
 CREATE INDEX IF NOT EXISTS ix_events_task_id ON events(task_id, id);
-CREATE INDEX IF NOT EXISTS ix_node_executions_run ON node_executions(run_id, started_at);
 """
 
 
@@ -228,9 +195,7 @@ class Repository(ReportRepositoryMixin):
             self._ensure_column(connection, "evidence", "query", "TEXT")
             self._ensure_column(connection, "evidence", "query_hash", "TEXT")
             self._ensure_column(connection, "execution_runs", "parent_run_id", "TEXT")
-            self._ensure_column(connection, "execution_runs", "forked_from_node_execution_id", "TEXT")
             self._ensure_column(connection, "execution_runs", "entry_node", "TEXT NOT NULL DEFAULT 'classify'")
-            self._ensure_column(connection, "execution_runs", "prompt_version_id", "TEXT")
             self._ensure_column(connection, "execution_runs", "result_json", "TEXT")
             self._ensure_column(connection, "execution_runs", "is_active", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "execution_runs", "data_revision", "INTEGER NOT NULL DEFAULT 0")
@@ -238,7 +203,6 @@ class Repository(ReportRepositoryMixin):
             self._ensure_column(connection, "execution_runs", "claimed_at", "TEXT")
             self._ensure_column(connection, "execution_runs", "heartbeat_at", "TEXT")
             self._ensure_column(connection, "execution_runs", "attempt_count", "INTEGER NOT NULL DEFAULT 0")
-            self._ensure_column(connection, "node_executions", "diagnostics_json", "TEXT NOT NULL DEFAULT '{}'")
             self._ensure_column(connection, "exports", "run_id", "TEXT")
             self._ensure_column(connection, "data_assets", "library_visible", "INTEGER NOT NULL DEFAULT 0")
             connection.execute("CREATE INDEX IF NOT EXISTS ix_evidence_run ON evidence(task_id, run_id)")
@@ -487,9 +451,9 @@ class Repository(ReportRepositoryMixin):
             connection.execute(
                 """INSERT INTO execution_runs(
                 id,task_id,question,status,error,started_at,finished_at,parent_run_id,
-                forked_from_node_execution_id,entry_node,prompt_version_id,result_json,is_active,
+                entry_node,result_json,is_active,
                 data_revision,message_sequence,claimed_at,heartbeat_at,attempt_count,input_snapshot_json)
-                VALUES (?, ?, ?, 'queued', NULL, ?, NULL, NULL, NULL, 'classify', NULL, NULL, 0,
+                VALUES (?, ?, ?, 'queued', NULL, ?, NULL, NULL, 'classify', NULL, 0,
                 ?, ?, NULL, NULL, 0, ?)""",
                 (
                     run_id, task_id, content, now, task["data_revision"], message_sequence,
@@ -596,9 +560,7 @@ class Repository(ReportRepositoryMixin):
         run_id: str | None = None,
         status: str = "running",
         parent_run_id: str | None = None,
-        forked_from_node_execution_id: str | None = None,
         entry_node: str = "classify",
-        prompt_version_id: str | None = None,
         data_revision: int | None = None,
         message_sequence: int | None = None,
         input_snapshot: dict[str, Any] | None = None,
@@ -628,12 +590,12 @@ class Repository(ReportRepositoryMixin):
             connection.execute(
                 """INSERT INTO execution_runs(
                 id,task_id,question,status,error,started_at,finished_at,parent_run_id,
-                forked_from_node_execution_id,entry_node,prompt_version_id,result_json,is_active,
+                entry_node,result_json,is_active,
                 data_revision,message_sequence,claimed_at,heartbeat_at,attempt_count,input_snapshot_json)
-                VALUES (?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, ?, NULL, 0, ?, ?, NULL, NULL, 0, ?)""",
+                VALUES (?, ?, ?, ?, NULL, ?, NULL, ?, ?, NULL, 0, ?, ?, NULL, NULL, 0, ?)""",
                 (
                     run_id, task_id, question, status, utc_now(), parent_run_id,
-                    forked_from_node_execution_id, entry_node, prompt_version_id,
+                    entry_node,
                     data_revision, message_sequence,
                     json.dumps(captured_input, ensure_ascii=False),
                 ),
@@ -658,6 +620,9 @@ class Repository(ReportRepositoryMixin):
             )
 
     def cancel_queued_execution(self, task_id: str, run_id: str) -> None:
+        event_status: TaskStatus
+        event_progress: int
+        event_message: str
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             run = connection.execute(
@@ -666,39 +631,46 @@ class Repository(ReportRepositoryMixin):
             ).fetchone()
             if run is None:
                 raise KeyError(run_id)
-            if run["status"] != "queued":
-                raise ValueError("只能取消尚未开始执行的分析")
+            if run["status"] not in {"queued", "running"}:
+                raise ValueError("该分析已结束")
             now = utc_now()
+            running = run["status"] == "running"
             connection.execute(
-                "UPDATE execution_runs SET status='cancelled',error=?,finished_at=? WHERE id=?",
-                ("用户已取消", now, run_id),
+                "UPDATE execution_runs SET status='cancelled',error=?,finished_at=? WHERE id=? AND status=?",
+                ("用户已中止" if running else "用户已取消", now, run_id, run["status"]),
             )
             active = connection.execute(
-                """SELECT status FROM execution_runs WHERE task_id=? AND is_active=1
+                """SELECT status FROM execution_runs WHERE task_id=? AND id<>? AND is_active=1
                 AND result_json IS NOT NULL AND data_revision=(SELECT data_revision FROM tasks WHERE id=?)""",
-                (task_id, task_id),
+                (task_id, run_id, task_id),
             ).fetchone()
             restored = (
                 TaskStatus.COMPLETED_WITH_WARNINGS
                 if active and active["status"] == TaskStatus.COMPLETED_WITH_WARNINGS.value
-                else TaskStatus.COMPLETED if active else TaskStatus.READY
+                else TaskStatus.COMPLETED if active else TaskStatus.CANCELLED if running else TaskStatus.READY
+            )
+            event_status = restored
+            event_progress = 100 if active else 0 if running else 15
+            event_message = (
+                ("已中止本次分析，保留原分析结果" if active else "分析已中止，可以重新提问")
+                if running
+                else ("已取消重跑，保留原分析结果" if active else "分析已取消，可以重新提问")
             )
             connection.execute(
                 """UPDATE tasks SET status=?,progress=?,status_message=?,error=NULL,updated_at=?
                 WHERE id=?""",
-                (
-                    restored,
-                    100 if active else 15,
-                    "已取消重跑，保留原分析结果" if active else "分析已取消，可以重新提问",
-                    now,
-                    task_id,
-                ),
+                (restored, event_progress, event_message, now, task_id),
             )
         self.add_event(
-            task_id, "run.cancelled", restored, 100 if active else 15,
-            "已取消重跑，保留原分析结果" if active else "分析已取消",
+            task_id, "run.cancelled", event_status, event_progress,
+            event_message,
             {"run_id": run_id},
         )
+
+    def is_execution_cancelled(self, run_id: str) -> bool:
+        with self.connect() as connection:
+            row = connection.execute("SELECT status FROM execution_runs WHERE id=?", (run_id,)).fetchone()
+        return row is None or row["status"] == "cancelled"
 
     def queue_position(self, run_id: str) -> int | None:
         with self.connect() as connection:
@@ -742,6 +714,11 @@ class Repository(ReportRepositoryMixin):
             ).fetchone()
             if row is None:
                 raise KeyError(run_id)
+            current = connection.execute(
+                "SELECT status FROM execution_runs WHERE id=?", (run_id,)
+            ).fetchone()
+            if current is not None and current["status"] == "cancelled":
+                return
             if result is not None or activate:
                 self._assert_run_input_current(connection, row)
             connection.execute(
@@ -908,140 +885,6 @@ class Repository(ReportRepositoryMixin):
             ),
             {"run_id": failed_run_id, "error": error},
         )
-
-    def ensure_prompt_version(
-        self,
-        node_name: str,
-        version: str,
-        content: str,
-        parent_version_id: str | None = None,
-    ) -> PromptVersion:
-        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        with self.connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM prompt_versions WHERE node_name=? AND content_hash=?",
-                (node_name, content_hash),
-            ).fetchone()
-            if row is None:
-                prompt_id = str(uuid.uuid4())
-                connection.execute(
-                    "INSERT INTO prompt_versions VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (prompt_id, node_name, version, content, content_hash, parent_version_id, utc_now()),
-                )
-                row = connection.execute("SELECT * FROM prompt_versions WHERE id=?", (prompt_id,)).fetchone()
-        return PromptVersion(**dict(row))
-
-    def get_prompt_version(self, prompt_id: str) -> PromptVersion:
-        with self.connect() as connection:
-            row = connection.execute("SELECT * FROM prompt_versions WHERE id=?", (prompt_id,)).fetchone()
-        if row is None:
-            raise KeyError(prompt_id)
-        return PromptVersion(**dict(row))
-
-    def start_node_execution(
-        self,
-        run_id: str,
-        node_name: str,
-        input_state: dict[str, Any],
-        prompt_version_id: str,
-        model_config: dict[str, Any],
-        state_schema_version: int,
-    ) -> str:
-        execution_id = str(uuid.uuid4())
-        with self.connect() as connection:
-            occurrence = connection.execute(
-                "SELECT COUNT(*) + 1 FROM node_executions WHERE run_id=? AND node_name=?",
-                (run_id, node_name),
-            ).fetchone()[0]
-            connection.execute(
-                """INSERT INTO node_executions(
-                id,run_id,node_name,occurrence,input_state_json,output_state_json,
-                state_schema_version,prompt_version_id,model_config_json,status,error,
-                started_at,finished_at,diagnostics_json)
-                VALUES (?, ?, ?, ?, ?, NULL, ?, ?, ?, 'running', NULL, ?, NULL, '{}')""",
-                (
-                    execution_id, run_id, node_name, occurrence,
-                    json.dumps(input_state, ensure_ascii=False, default=str), state_schema_version,
-                    prompt_version_id, json.dumps(model_config, ensure_ascii=False), utc_now(),
-                ),
-            )
-        return execution_id
-
-    def record_node_diagnostics(self, execution_id: str, diagnostics: dict[str, Any]) -> None:
-        with self.connect() as connection:
-            row = connection.execute(
-                "SELECT diagnostics_json FROM node_executions WHERE id=?", (execution_id,)
-            ).fetchone()
-            if row is None:
-                return
-            current = json.loads(row["diagnostics_json"] or "{}")
-            current.update(diagnostics)
-            connection.execute(
-                "UPDATE node_executions SET diagnostics_json=? WHERE id=?",
-                (json.dumps(current, ensure_ascii=False, default=str), execution_id),
-            )
-
-    def finish_node_execution(
-        self,
-        execution_id: str,
-        output_state: dict[str, Any] | None,
-        *,
-        error: str | None = None,
-    ) -> None:
-        with self.connect() as connection:
-            connection.execute(
-                """UPDATE node_executions SET output_state_json=?, status=?, error=?, finished_at=?
-                WHERE id=?""",
-                (
-                    json.dumps(output_state, ensure_ascii=False, default=str) if output_state is not None else None,
-                    "failed" if error else "completed", error, utc_now(), execution_id,
-                ),
-            )
-
-    def list_node_executions(self, task_id: str, run_id: str) -> list[NodeExecutionSummary]:
-        self.get_run(task_id, run_id)
-        with self.connect() as connection:
-            rows = connection.execute(
-                """SELECT n.*, p.id AS p_id, p.node_name AS p_node_name, p.version AS p_version,
-                p.content AS p_content, p.content_hash AS p_content_hash,
-                p.parent_version_id AS p_parent_version_id, p.created_at AS p_created_at
-                FROM node_executions n JOIN prompt_versions p ON p.id=n.prompt_version_id
-                WHERE n.run_id=? ORDER BY n.started_at, n.occurrence""",
-                (run_id,),
-            ).fetchall()
-        return [self._node_summary(row) for row in rows]
-
-    def get_node_execution(self, task_id: str, execution_id: str) -> NodeExecutionDetail:
-        with self.connect() as connection:
-            row = connection.execute(
-                """SELECT n.*, r.task_id, p.id AS p_id, p.node_name AS p_node_name,
-                p.version AS p_version, p.content AS p_content, p.content_hash AS p_content_hash,
-                p.parent_version_id AS p_parent_version_id, p.created_at AS p_created_at
-                FROM node_executions n JOIN execution_runs r ON r.id=n.run_id
-                JOIN prompt_versions p ON p.id=n.prompt_version_id
-                WHERE r.task_id=? AND n.id=?""",
-                (task_id, execution_id),
-            ).fetchone()
-        if row is None:
-            raise KeyError(execution_id)
-        summary = self._node_summary(row)
-        return NodeExecutionDetail(
-            **summary.model_dump(),
-            input_state=json.loads(row["input_state_json"]),
-            output_state=json.loads(row["output_state_json"]) if row["output_state_json"] else None,
-            state_schema_version=row["state_schema_version"],
-            model_parameters=json.loads(row["model_config_json"]),
-            diagnostics=json.loads(row["diagnostics_json"] or "{}"),
-        )
-
-    def prompt_versions_for_run(self, run_id: str) -> dict[str, str]:
-        with self.connect() as connection:
-            rows = connection.execute(
-                """SELECT node_name, prompt_version_id FROM node_executions
-                WHERE run_id=? AND status='completed' ORDER BY started_at""",
-                (run_id,),
-            ).fetchall()
-        return {row["node_name"]: row["prompt_version_id"] for row in rows}
 
     def record_export(self, task_id: str, kind: str, path: Path, run_id: str | None = None) -> None:
         with self.connect() as connection:
@@ -2249,8 +2092,8 @@ class Repository(ReportRepositoryMixin):
                 connection.execute(
                     """INSERT INTO execution_runs(
                     id,task_id,question,status,error,started_at,finished_at,parent_run_id,
-                    forked_from_node_execution_id,entry_node,prompt_version_id,result_json,is_active)
-                    VALUES (?, ?, ?, 'completed', NULL, ?, ?, NULL, NULL, 'legacy', NULL, ?, 1)""",
+                    entry_node,result_json,is_active)
+                    VALUES (?, ?, ?, 'completed', NULL, ?, ?, NULL, 'legacy', ?, 1)""",
                     (
                         run_id, task["id"], message["content"] if message else "旧版分析",
                         task["created_at"], task["updated_at"], task["result_json"],
@@ -2263,40 +2106,12 @@ class Repository(ReportRepositoryMixin):
         return WorkflowRun(
             id=row["id"], task_id=row["task_id"], question=row["question"], status=row["status"],
             parent_run_id=row["parent_run_id"],
-            forked_from_node_execution_id=row["forked_from_node_execution_id"],
-            entry_node=row["entry_node"] or "classify", prompt_version_id=row["prompt_version_id"],
+            entry_node=row["entry_node"] or "classify",
             result=AnalysisDraft.model_validate_json(row["result_json"]) if row["result_json"] else None,
             is_active=bool(row["is_active"]), error=row["error"], started_at=row["started_at"],
             finished_at=row["finished_at"], data_revision=row["data_revision"],
             message_sequence=row["message_sequence"], claimed_at=row["claimed_at"],
             heartbeat_at=row["heartbeat_at"], attempt_count=row["attempt_count"],
-        )
-
-    @staticmethod
-    def _node_summary(row: sqlite3.Row) -> NodeExecutionSummary:
-        diagnostics = json.loads(row['diagnostics_json'] or '{}')
-        mode = diagnostics.get('execution_mode', 'unknown')
-        if mode == 'unknown' and (diagnostics.get('model_request_attempt') or diagnostics.get('attempt')) and (
-            'prompt_eval_count' in diagnostics or 'response_content_chars' in diagnostics
-        ):
-            mode = 'model'
-        if mode not in {'model', 'deterministic', 'unknown'}:
-            mode = 'unknown'
-        supported = mode == 'model' and row['status'] == 'completed'
-        reason = None if supported else (
-            '纯程序节点不使用提示词，请重新发起分析以重新计算。' if mode == 'deterministic' else
-            '历史记录无法确认模型调用，节点仅供查看。' if mode == 'unknown' else '只能重跑已完成的模型节点。'
-        )
-        prompt = PromptVersion(
-            id=row["p_id"], node_name=row["p_node_name"], version=row["p_version"],
-            content=row["p_content"], content_hash=row["p_content_hash"],
-            parent_version_id=row["p_parent_version_id"], created_at=row["p_created_at"],
-        )
-        return NodeExecutionSummary(
-            execution_mode=mode, prompt_replay_supported=supported, replay_unavailable_reason=reason,
-            id=row["id"], run_id=row["run_id"], node_name=row["node_name"],
-            occurrence=row["occurrence"], prompt_version=prompt, status=row["status"],
-            error=row["error"], started_at=row["started_at"], finished_at=row["finished_at"],
         )
 
 

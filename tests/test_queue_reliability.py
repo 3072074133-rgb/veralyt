@@ -51,6 +51,18 @@ def test_interrupted_run_is_requeued(queued_task: str) -> None:
     assert run.attempt_count == 1
 
 
+def test_running_run_can_be_cancelled_and_task_becomes_terminal(queued_task: str) -> None:
+    run_id = repository.queue_analysis(queued_task, "分析收入")
+    assert repository.mark_execution_running(run_id) is True
+    repository.cancel_queued_execution(queued_task, run_id)
+
+    assert repository.get_run_by_id(run_id).status == "cancelled"
+    snapshot = repository.get_task(queued_task)
+    assert snapshot.status == TaskStatus.CANCELLED
+    assert snapshot.pending_run_id is None
+    assert repository.is_execution_cancelled(run_id) is True
+
+
 def test_failed_follow_up_restores_the_previous_active_result(queued_task: str) -> None:
     result = AnalysisDraft(title="原结果", summary="已验证的原结果")
     source_run_id = repository.start_execution(queued_task, "原分析")

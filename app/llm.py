@@ -67,10 +67,47 @@ class OllamaGateway:
         text = path.read_text(encoding="utf-8")
         return re.sub(r"^---\s*.*?\s*---\s*", "", text, count=1, flags=re.DOTALL)
 
-    def prompt_version(self, name: str) -> str:
-        text = (self.prompt_dir / f"{name}.md").read_text(encoding="utf-8")
-        match = re.search(r"^prompt_version:\s*([^\r\n]+)", text, flags=re.MULTILINE)
-        return match.group(1).strip() if match else "file"
+    def text(
+        self,
+        prompt_name: str,
+        context: dict[str, Any],
+        *,
+        thinking: bool = False,
+        diagnostics: Callable[[dict[str, Any]], None] | None = None,
+    ) -> str:
+        """Generate an unconstrained natural-language reply for chat turns."""
+        prompt = self.load_prompt(prompt_name)
+        selection = _select_context(prompt_name, prompt, [context])
+        input_tokens = _estimate_tokens(prompt + selection.serialized_context)
+        _ensure_input_budget(input_tokens, selection.budget)
+        started_at = time.perf_counter()
+        _record_diagnostics(diagnostics, {**_selection_diagnostics(selection), "execution_mode": "model"})
+        try:
+            response = self.client.chat(
+                model=settings.ollama_model,
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": selection.serialized_context},
+                ],
+                think=thinking,
+                options={
+                    "temperature": 0.2,
+                    "num_ctx": selection.budget.context_tokens,
+                    "num_predict": selection.budget.output_tokens,
+                },
+            )
+            content = (getattr(response.message, "content", "") or "").strip()
+            log_event(logger, "llm.text.completed", prompt_name=prompt_name,
+                      model=settings.ollama_model, duration_ms=duration_ms(started_at),
+                      response_content_chars=len(content))
+            return content
+        except Exception as exc:
+            logger.exception("llm.text.failed", extra={"event_fields": {
+                "event": "llm.text.failed", "prompt_name": prompt_name,
+                "model": settings.ollama_model,
+                "duration_ms": duration_ms(started_at),
+            }})
+            raise LLMUnavailableError(f"无法连接本地模型 {settings.ollama_model}：{exc}") from exc
 
     def structured(
         self,
@@ -238,13 +275,21 @@ def _select_context(
     prompt: str,
     contexts: list[dict[str, Any]],
 ) -> ContextSelection:
-    serialized = [json.dumps(context, ensure_ascii=False, default=str) for context in contexts]
-    token_counts = [_estimate_tokens(prompt + value) for value in serialized]
+    serialized: list[str | None] = [None] * len(contexts)
+    token_counts: list[int | None] = [None] * len(contexts)
+
+    def measure(index: int) -> tuple[str, int]:
+        if serialized[index] is None:
+            serialized[index] = json.dumps(contexts[index], ensure_ascii=False, default=str)
+            token_counts[index] = _estimate_tokens(prompt + serialized[index])
+        return serialized[index], token_counts[index]  # type: ignore[return-value]
+
     base = model_budget(prompt_name)
-    for index, input_tokens in enumerate(token_counts):
+    for index in range(len(contexts)):
+        value, input_tokens = measure(index)
         if input_tokens <= base.input_limit:
             return ContextSelection(
-                contexts[index], serialized[index], input_tokens, token_counts[0], index, base, False
+                contexts[index], value, input_tokens, measure(0)[1], index, base, False
             )
 
     max_context = max(base.context_tokens, settings.model_max_context_tokens)
@@ -252,12 +297,13 @@ def _select_context(
         max_context = base.context_tokens
     maximum = model_budget(prompt_name, context_tokens=max_context)
     for index in reversed(range(len(contexts))):
-        if token_counts[index] <= maximum.input_limit:
+        value, input_tokens = measure(index)
+        if input_tokens <= maximum.input_limit:
             return ContextSelection(
-                contexts[index], serialized[index], token_counts[index], token_counts[0], index, maximum, True
+                contexts[index], value, input_tokens, measure(0)[1], index, maximum, True
             )
 
-    smallest = min(token_counts)
+    smallest = min(measure(index)[1] for index in range(len(contexts)))
     raise LLMContextOverflowError(
         f"{prompt_name} 压缩后输入仍预计 {smallest} tokens，超过最大安全上限 "
         f"{maximum.input_limit}（上下文 {maximum.context_tokens}，预留输出 {maximum.output_tokens}）"

@@ -116,7 +116,7 @@ def _reflection_tracker() -> SimpleNamespace:
 
 def test_failed_validation_skips_model_reflection(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("app.workflow.repository.update_task", lambda *args, **kwargs: None)
-    monkeypatch.setattr("app.workflow.begin_node", lambda *args, **kwargs: _reflection_tracker())
+    monkeypatch.setattr("app.workflow.start_node", lambda *args, **kwargs: _reflection_tracker())
     monkeypatch.setattr(
         "app.workflow.llm.structured",
         lambda *args, **kwargs: pytest.fail("model should not run after deterministic validation failed"),
@@ -147,7 +147,7 @@ def test_reflection_schema_error_falls_back_to_validated_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("app.workflow.repository.update_task", lambda *args, **kwargs: None)
-    monkeypatch.setattr("app.workflow.begin_node", lambda *args, **kwargs: _reflection_tracker())
+    monkeypatch.setattr("app.workflow.start_node", lambda *args, **kwargs: _reflection_tracker())
     monkeypatch.setattr(
         "app.workflow.llm.structured",
         lambda *args, **kwargs: (_ for _ in ()).throw(LLMStructuredOutputError("invalid schema")),

@@ -37,14 +37,14 @@ async function remove(task: TaskListItem) {
   catch (reason) { ElMessage.error(reason instanceof Error ? reason.message : '删除失败') }
 }
 async function changePage(value: number) { page.value = value; await load() }
-const labels: Record<string, string> = { ready: '待分析', ingesting: '读取中', classifying: '识别需求', planning: '规划中', needs_clarification: '待确认', executing: '分析中', validating: '校验中', reflecting: '复核中', needs_review: '待人工复核', completed_with_warnings: '完成但有警告', completed: '已完成', failed: '失败', off_topic: '非分析问题' }
+const labels: Record<string, string> = { ready: '待分析', ingesting: '读取中', classifying: '识别需求', planning: '规划中', needs_clarification: '待确认', executing: '分析中', validating: '校验中', reflecting: '复核中', needs_review: '待人工复核', completed_with_warnings: '完成但有警告', completed: '已完成', failed: '失败', cancelled: '已中止', off_topic: '已回复' }
 </script>
 
 <template>
   <main class="workspace">
     <header class="topbar"><div><h1>历史分析任务</h1><p>保存在这台电脑上的分析记录</p></div><button class="button" :disabled="loading" @click="load"><RefreshCw :size="16" />刷新</button></header>
     <section class="history-content">
-      <div class="history-filters"><label><Search :size="16" /><input v-model="query" placeholder="搜索任务名称或数据文件"></label><select v-model="status"><option value="">全部状态</option><option value="completed">已完成</option><option value="completed_with_warnings">完成但有警告</option><option value="needs_review">待人工复核</option><option value="failed">失败</option><option value="needs_clarification">待确认</option><option value="ready">待分析</option></select><button class="button" @click="query='';status=''">清除筛选</button></div>
+      <div class="history-filters"><label><Search :size="16" /><input v-model="query" placeholder="搜索任务名称或数据文件"></label><select v-model="status"><option value="">全部状态</option><option value="completed">已完成</option><option value="completed_with_warnings">完成但有警告</option><option value="needs_review">待人工复核</option><option value="failed">失败</option><option value="cancelled">已中止</option><option value="needs_clarification">待确认</option><option value="ready">待分析</option></select><button class="button" @click="query='';status=''">清除筛选</button></div>
       <p class="history-summary">共 {{ total }} 个任务</p>
       <div class="history-table">
         <div class="history-row history-head"><span>任务</span><span>状态</span><span>更新时间</span><span>数据文件</span><span>操作</span></div>

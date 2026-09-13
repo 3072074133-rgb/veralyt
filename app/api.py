@@ -40,10 +40,6 @@ from .models import (
     KnowledgeMatch,
     KnowledgeRevisionCreate,
     MessageRequest,
-    NodeExecutionDetail,
-    NodeExecutionSummary,
-    ReplayNodeRequest,
-    ReplayNodeResponse,
     ReportDetail,
     ReportJob,
     ReportSummary,
@@ -424,85 +420,6 @@ async def list_run_artifacts(task_id: str, run_id: str) -> list[RunArtifact]:
         raise HTTPException(404, "分析运行不存在") from exc
 
 
-@router.get("/tasks/{task_id}/runs/{run_id}/nodes", response_model=list[NodeExecutionSummary])
-async def list_run_nodes(task_id: str, run_id: str) -> list[NodeExecutionSummary]:
-    _snapshot(task_id)
-    try:
-        return repository.list_node_executions(task_id, run_id)
-    except KeyError as exc:
-        raise HTTPException(404, "分析分支不存在") from exc
-
-
-@router.get("/tasks/{task_id}/nodes/{execution_id}", response_model=NodeExecutionDetail)
-async def get_node_execution(task_id: str, execution_id: str) -> NodeExecutionDetail:
-    _snapshot(task_id)
-    try:
-        return repository.get_node_execution(task_id, execution_id)
-    except KeyError as exc:
-        raise HTTPException(404, "节点快照不存在") from exc
-
-
-@router.post("/tasks/{task_id}/nodes/{execution_id}/replay", response_model=ReplayNodeResponse, status_code=status.HTTP_202_ACCEPTED)
-async def replay_node(task_id: str, execution_id: str, request: ReplayNodeRequest) -> ReplayNodeResponse:
-    snapshot = _snapshot(task_id)
-    if snapshot.status not in {
-        TaskStatus.COMPLETED, TaskStatus.COMPLETED_WITH_WARNINGS, TaskStatus.NEEDS_REVIEW,
-        TaskStatus.FAILED, TaskStatus.OFF_TOPIC, TaskStatus.NEEDS_CLARIFICATION,
-    }:
-        raise HTTPException(409, "当前分析尚未结束，不能创建重跑分支")
-    if repository.has_pending_run(task_id):
-        raise HTTPException(409, "已有分析分支正在运行")
-    try:
-        source = repository.get_node_execution(task_id, execution_id)
-        source_run = repository.get_run(task_id, source.run_id)
-    except KeyError as exc:
-        raise HTTPException(404, "节点快照不存在") from exc
-    if source.status != "completed":
-        raise HTTPException(409, "只能从已经完成的节点重新运行")
-    if not source.prompt_replay_supported:
-        raise HTTPException(409, source.replay_unavailable_reason)
-    try:
-        repository.assert_run_context_current(task_id, source.run_id)
-    except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
-    source_input_snapshot = repository.get_run_input_snapshot(source.run_id)
-    content = request.prompt_content.strip()
-    if content == source.prompt_version.content.strip():
-        raise HTTPException(400, "提示词没有发生变化")
-    prompt = repository.ensure_prompt_version(
-        source.node_name,
-        f"custom-{source.prompt_version.version}",
-        content,
-        source.prompt_version.id,
-    )
-    try:
-        run_id = repository.start_execution(
-            task_id,
-            source_run.question,
-            status="queued",
-            parent_run_id=source.run_id,
-            forked_from_node_execution_id=source.id,
-            entry_node=source.node_name,
-            prompt_version_id=prompt.id,
-            data_revision=source_run.data_revision,
-            message_sequence=source_run.message_sequence,
-            input_snapshot=source_input_snapshot,
-        )
-    except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
-    repository.update_task(
-        task_id,
-        status=TaskStatus.CLASSIFYING,
-        progress=18,
-        status_message="提示词重跑已进入队列",
-        clear_error=True,
-        event_type="run.replay_queued",
-        payload={"run_id": run_id, "source_node_execution_id": source.id},
-    )
-    await worker.enqueue_replay(run_id)
-    return ReplayNodeResponse(run_id=run_id, status="queued")
-
-
 @router.post("/tasks/{task_id}/runs/{run_id}/activate", response_model=WorkflowRun)
 async def activate_run(task_id: str, run_id: str) -> WorkflowRun:
     _snapshot(task_id)
@@ -661,7 +578,7 @@ async def delete_task(task_id: str) -> None:
     if snapshot.status not in {
         TaskStatus.READY, TaskStatus.OFF_TOPIC, TaskStatus.NEEDS_CLARIFICATION,
         TaskStatus.NEEDS_REVIEW, TaskStatus.COMPLETED_WITH_WARNINGS,
-        TaskStatus.COMPLETED, TaskStatus.FAILED,
+        TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED,
     }:
         raise HTTPException(409, "任务正在运行，完成后才能删除")
     directory = task_dir(task_id)

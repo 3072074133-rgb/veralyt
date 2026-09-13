@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+import hashlib
 import re
 import sqlite3
 import json
@@ -34,26 +35,28 @@ from .evidence_validation import (
 )
 from .llm import LLMContextOverflowError, LLMError, LLMStructuredOutputError, LLMUnavailableError, llm
 from .financial_reports import financial_kind, financial_draft, query_financial_report
-from .followups import calculate_metric, metric_draft, reuse_explanation, FORMULAS
-from .legacy_intent import classify_legacy
+from .followups import calculate_metric, metric_draft, FORMULAS
 from .receivables import is_overdue_ranking, query_overdue, overdue_draft
+from .insights import derive_insights
 from .knowledge_service import retrieve_for_run
 from .models import (
     AnalysisDraft,
-    AnalysisPlan,
+    AnalysisPlan, PlanDecision,
     AnalysisState,
     DatasetInfo,
     EvidencePointer,
     GeneratedAnalysisDraft,
-    IntentDecision,
     Metric,
     Finding,
     ChartSeries,
     ChartSpec,
     CalculationDetail,
+    DeliveryCheck,
+    DeliveryGate,
+    Insight,
     PlanStep,
     QuerySpec,
-    QueryRequest,
+    QueryDecision,
     ReflectionDecision,
     ReviewIssue,
     Severity,
@@ -61,13 +64,27 @@ from .models import (
     ToolExecutionResult,
     ValidationIssue,
     ValidationReport,
+    MessageRecord,
 )
-from .node_runtime import begin_node
+from .node_logging import start_node
 from .observability import duration_ms, log_event
 from .repository import repository
+from .workflow_nodes.classify import classify_node as classify_node_impl, respond_node as respond_node_impl
+from .workflow_nodes.routing import (
+    route_execute as route_execute_impl,
+    route_intent as route_intent_impl,
+    route_plan as route_plan_impl,
+    route_reflection as route_reflection_impl,
+    route_validation as route_validation_impl,
+)
+from .workflow_nodes.rules import is_contextual_followup
 
 
 logger = logging.getLogger(__name__)
+
+
+class AnalysisCancelled(Exception):
+    """Raised at workflow node boundaries after a user cancellation."""
 __all__ = [
     "_as_decimal",
     "_evidence_row_count_supports",
@@ -148,56 +165,26 @@ def _has_clear_analysis_intent(question: str, has_uploaded_data: bool) -> bool:
 
 
 def classify_node(state: AnalysisState) -> dict[str, Any]:
-    if not settings.model_intent_enabled:
-        return classify_legacy(state)
-    repository.update_task(state.task_id, status=TaskStatus.CLASSIFYING, progress=20, status_message='正在理解本轮问题')
-    tracker = begin_node(state, 'classify')
-    context = state.conversation_summary or {}
-    recent = context.get('recent_messages') or []
-    compact = {
-        'user_question': state.user_question,
-        'has_uploaded_data': bool(state.datasets),
-        'available_metrics': list(FORMULAS),
-        'recent_messages': [{'role': item.get('role'), 'content': str(item.get('content', ''))[:400]}
-                            for item in recent[-4:] if isinstance(item, dict)],
-        'dataset_names': [str(item.get('display_name', ''))[:80] for item in state.datasets[:8]],
-        'report_topic': str((context.get('memory') or {}).get('task_goal', ''))[:200],
-    }
-    minimal = {**compact, 'recent_messages': compact['recent_messages'][-2:], 'dataset_names': []}
-    try:
-        try:
-            decision = llm.structured('intent_classifier', compact, IntentDecision, thinking=False,
-                prompt_override=tracker.prompt.content, fallback_contexts=[minimal],
-                diagnostics=tracker.record_diagnostics)
-        except (LLMStructuredOutputError, LLMContextOverflowError) as exc:
-            tracker.record_diagnostics({'classification_error': str(exc), 'fallback': 'clarification'})
-            decision = IntentDecision(route='clarification', reply='暂时无法可靠理解本轮问题，请补充具体需求或指标口径。')
-        if decision.route == 'derived_metric' and decision.metric not in FORMULAS:
-            decision = IntentDecision(route='clarification', reply='请明确指标口径：毛利率、营业利润率、净利润率或资产负债率。')
-        return tracker.complete({'intent': decision.model_dump(mode='json')})
-    except Exception as exc:
-        tracker.fail(exc)
-        raise
+    return classify_node_impl(state)
 
 
 
 
 def route_intent(state: AnalysisState) -> str:
-    return 'plan' if state.intent and IntentDecision.model_validate(state.intent).is_analysis else 'off_topic'
+    return route_intent_impl(state)
 
 
-def off_topic_node(state: AnalysisState) -> dict[str, Any]:
-    decision = IntentDecision.model_validate(state.intent)
-    message = decision.suggested_response or "这个问题不属于数据分析范围。请上传表格后提出计算、对比、趋势或异常检查需求。"
-    if not state.is_replay:
-        repository.add_message(state.task_id, "assistant", message)
-    repository.update_task(state.task_id, status=TaskStatus.OFF_TOPIC, progress=100, status_message="本轮已回复")
-    return {"final_status": "off_topic"}
+def respond_node(state: AnalysisState) -> dict[str, Any]:
+    return respond_node_impl(state)
+
+
+# Compatibility alias for older imports.
+off_topic_node = respond_node
 
 
 def plan_node(state: AnalysisState) -> dict[str, Any]:
     repository.update_task(state.task_id, status=TaskStatus.PLANNING, progress=35, status_message="正在理解指标和分析口径")
-    tracker = begin_node(state, "plan")
+    tracker = start_node(state, "plan")
     try:
         datasets = [DatasetInfo.model_validate(item) for item in state.datasets]
         if (state.intent or {}).get('route') != 'clarification' and is_overdue_ranking(state.user_question):
@@ -209,12 +196,6 @@ def plan_node(state: AnalysisState) -> dict[str, Any]:
             return tracker.complete({'plan': AnalysisPlan(goal='确认应收明细', can_execute=False,
                 clarification_question='请明确要分析的应收账款表，需包含客户名称和逾期余额。').model_dump(mode='json')})
         intent = state.intent or {}
-        if intent.get('route') == 'explanation':
-            reused = reuse_explanation(state)
-            if reused:
-                return tracker.complete({'plan': AnalysisPlan(goal='依据当前有效证据解释本轮问题',
-                    can_execute=True, steps=[]).model_dump(mode='json'),
-                    'tool_results': [reused.model_dump(mode='json')]})
         if intent.get('route') == 'clarification':
             question = ('你想了解毛利率、营业利润率，还是净利润率？请写出具体指标名称。'
                         if intent.get('metric') == 'ambiguous' else intent.get('reply') or intent.get('suggested_response') or
@@ -319,6 +300,7 @@ def plan_node(state: AnalysisState) -> dict[str, Any]:
             plan_context = {
                 "user_question": state.user_question,
                 "conversation_context": state.conversation_summary or {},
+                "previous_result": state.previous_result or {},
                 "dataset_catalog": compact_catalog,
                 "knowledge_context": state.knowledge_context,
                 "confirmed_policies": {},
@@ -330,7 +312,7 @@ def plan_node(state: AnalysisState) -> dict[str, Any]:
             }
             try:
                 plan = llm.structured(
-                    "analysis_planner", plan_context, AnalysisPlan,
+                    "analysis_planner", plan_context, PlanDecision,
                 thinking=False,
                 prompt_override=tracker.prompt.content,
                 fallback_contexts=[
@@ -349,6 +331,8 @@ def plan_node(state: AnalysisState) -> dict[str, Any]:
                 ],
                     diagnostics=tracker.record_diagnostics,
                 )
+                if isinstance(plan, PlanDecision):
+                    plan = AnalysisPlan(goal=plan.goal or state.user_question, can_execute=plan.action == "analyze", steps=plan.steps, clarification_question=plan.clarification)
             except LLMStructuredOutputError as exc:
                 tracker.record_diagnostics({"planner_fallback": "minimal_deterministic", "planner_error": str(exc)})
                 viable = next((item for item in matches if _has_named_measure(item.dataset)), None)
@@ -359,9 +343,21 @@ def plan_node(state: AnalysisState) -> dict[str, Any]:
                     plan = AnalysisPlan(goal="生成基础数据概览", can_execute=True, steps=[PlanStep(
                         id="fallback_overview", purpose="汇总主要金额指标并提取可复核证据",
                         tool="auto_analyze", dataset_id=viable.dataset.id)])
+        # In a hybrid flow a contextual follow-up may be answerable from the
+        # current evidence even when the model cannot name a new field.  Keep
+        # the question, reuse the evidence, and let the draft model explain
+        # the limitation instead of forcing a second generic clarification.
+        if is_contextual_followup(state.user_question, bool(state.previous_result)) and not plan.can_execute:
+            plan = AnalysisPlan(
+                goal=state.user_question,
+                can_execute=True,
+                assumptions=["本轮基于上一轮已验证结果和证据回答；如需新期间或新维度，再补充具体范围。"],
+                steps=[],
+            )
+            tracker.record_diagnostics({"planning_source": "hybrid_context_reuse"})
         plan = _normalize_plan_for_request(plan, state.user_question)
         plan = _bind_plan_datasets(plan, matches, state.confirmed_relationships)
-        if plan.can_execute and not plan.steps:
+        if plan.can_execute and not plan.steps and not is_contextual_followup(state.user_question, bool(state.previous_result)):
             plan.steps = [PlanStep(
                 id="analysis",
                 purpose=plan.goal,
@@ -381,8 +377,7 @@ def plan_node(state: AnalysisState) -> dict[str, Any]:
 
 
 def route_plan(state: AnalysisState) -> str:
-    plan = AnalysisPlan.model_validate(state.plan)
-    return "execute" if plan.can_execute else "clarify"
+    return route_plan_impl(state)
 
 
 def clarify_node(state: AnalysisState) -> dict[str, Any]:
@@ -402,7 +397,7 @@ def execute_node(state: AnalysisState) -> dict[str, Any]:
         state.task_id, status=TaskStatus.EXECUTING, progress=55,
         status_message="正在执行计算并提取证据", clear_clarification=True,
     )
-    tracker = begin_node(state, "execute")
+    tracker = start_node(state, "execute")
     try:
         datasets = [DatasetInfo.model_validate(item) for item in state.datasets]
         plan = AnalysisPlan.model_validate(state.plan)
@@ -465,10 +460,10 @@ def execute_node(state: AnalysisState) -> dict[str, Any]:
                 "knowledge_context": state.knowledge_context,
                 "latest_validation_failure": state.validation,
             }
-            request = llm.structured(
+            decision = llm.structured(
                 "tool_orchestrator",
                 query_context,
-                QueryRequest,
+                QueryDecision,
                 thinking=False,
                 prompt_override=tracker.prompt.content,
                 fallback_contexts=[
@@ -488,13 +483,12 @@ def execute_node(state: AnalysisState) -> dict[str, Any]:
                 ],
                 diagnostics=tracker.record_diagnostics,
             )
-            arguments = {
-                "query": {
-                    **request.query.model_dump(mode="json"),
-                    "dataset_id": selected.id,
-                },
-                "title": request.title,
-            }
+            measures = [m if isinstance(m, dict) else {"field": m, "aggregation": "sum"} for m in decision.measures]
+            if not measures:
+                candidate = next((c for c in selected.columns if c.role == "measure" or c.semantic_type in {"amount", "metric"}), None)
+                if candidate:
+                    measures = [{"field": candidate.name, "aggregation": candidate.default_aggregation if candidate.default_aggregation != "none" else "sum"}]
+            arguments = {"query": {**decision.model_dump(mode="json"), "measures": measures, "dataset_id": selected.id}, "title": "查询结果"}
         analysis_request = "；".join(
             part
             for part in [_context_text(state.conversation_summary), state.user_question, str(state.plan or "")]
@@ -520,6 +514,14 @@ def execute_node(state: AnalysisState) -> dict[str, Any]:
             else:
                 result = auto_analyze(state.task_id, selected_datasets, analysis_request, state.run_id)
         except Exception as exc:
+            previous = next((r for r in reversed(state.tool_results) if r.get("status") == "success" and r.get("arguments", {}).get("query")), None)
+            if isinstance(exc, LLMStructuredOutputError) and previous and name == "query_data":
+                try:
+                    result = query_from_spec(state.task_id, datasets, _query_spec_from_arguments(previous["arguments"], datasets), previous["arguments"].get("title", pending_step.purpose), state.run_id)
+                except Exception:
+                    result = None
+                if result is not None:
+                    return {"tool_results": [*state.tool_results, result], "completed_step_ids": [*state.completed_step_ids, pending_step.id]}
             result = ToolExecutionResult(
                 result_id="failed", tool_name=name, arguments=arguments, status="error",
                 summary="工具执行失败", error=str(exc), warnings=[],
@@ -582,11 +584,12 @@ def _with_evidence_scope(function):
 @_with_evidence_scope
 def draft_node(state: AnalysisState) -> dict[str, Any]:
     repository.update_task(state.task_id, status=TaskStatus.EXECUTING, progress=70, status_message="正在整理分析结论")
-    tracker = begin_node(state, "draft")
+    tracker = start_node(state, "draft")
     try:
         overdue_result = _latest_strategy_result(state, 'overdue_ranking')
         if overdue_result:
-            return tracker.complete({'draft': _finalize_draft(state, overdue_draft(overdue_result)).model_dump(mode='json'), 'draft_execution_mode': 'deterministic'})
+            draft = _derive_insights_for_draft(state, _finalize_draft(state, overdue_draft(overdue_result)))
+            return tracker.complete({'draft': draft.model_dump(mode='json'), 'draft_execution_mode': 'deterministic'})
         if (state.intent or {}).get('route') == 'derived_metric':
             result = _latest_strategy_result(state, 'derived_metric', metric=state.intent['metric'])
             if result is None:
@@ -596,17 +599,20 @@ def draft_node(state: AnalysisState) -> dict[str, Any]:
                 result = calculated.model_dump(mode='json')
                 state.tool_results = [*state.tool_results, result]
             draft = _finalize_draft(state, metric_draft(result))
+            draft = _derive_insights_for_draft(state, draft)
             return tracker.complete({'draft': draft.model_dump(mode='json'), 'tool_results': state.tool_results, 'draft_execution_mode': 'deterministic'})
         financial_result = next((r for r in reversed(state.tool_results)
                                  if r.get('status') == 'success' and
                                  r.get('arguments', {}).get('strategy') == 'financial_report'), None)
         if financial_result:
             draft = _finalize_draft(state, financial_draft(financial_result))
+            draft = _derive_insights_for_draft(state, draft)
             return tracker.complete({'draft': draft.model_dump(mode='json'), 'draft_execution_mode': 'deterministic'})
         if _uses_sectioned_department_profit_result(state):
             department_profit = _department_profit_draft(state)
             if department_profit is not None:
                 department_profit = _finalize_draft(state, department_profit)
+                department_profit = _derive_insights_for_draft(state, department_profit)
                 _publish_chart_artifacts(state, department_profit)
                 tracker.record_diagnostics({"draft_source": "deterministic_department_profit"})
                 return tracker.complete({"draft": department_profit.model_dump(mode="json"), "draft_execution_mode": "deterministic"})
@@ -618,6 +624,7 @@ def draft_node(state: AnalysisState) -> dict[str, Any]:
                     for item in [*overview.metrics, *overview.findings]:
                         item.evidence_pointers = []
                 overview = _finalize_draft(state, overview)
+                overview = _derive_insights_for_draft(state, overview)
                 _publish_chart_artifacts(state, overview)
                 return tracker.complete({"draft": overview.model_dump(mode="json"), "draft_execution_mode": "deterministic"})
         draft_context = _draft_context(state, row_limit=12)
@@ -636,11 +643,56 @@ def draft_node(state: AnalysisState) -> dict[str, Any]:
         )
         draft = AnalysisDraft.model_validate(generated_draft.model_dump(mode="json"))
         draft = _finalize_draft(state, draft)
+        draft = _derive_insights_for_draft(state, draft)
         _publish_chart_artifacts(state, draft)
         return tracker.complete({"draft": draft.model_dump(mode="json"), "draft_execution_mode": "model"})
     except Exception as exc:
         tracker.fail(exc)
         raise
+
+
+def _derive_insights_for_draft(state: AnalysisState, draft: AnalysisDraft) -> AnalysisDraft:
+    """Add deterministic, evidence-backed conclusions during draft creation."""
+    strategy = _deterministic_strategy(state)
+    results = [item for item in reversed(state.tool_results)
+               if item.get("status") == "success" and item.get("rows") and item.get("evidence_ids")
+               and (strategy not in {"derived_metric", "overdue_ranking", "financial_report"}
+                    or item.get("arguments", {}).get("strategy") == strategy)]
+    if not results:
+        return draft
+    generated: list[Insight] = []
+    for result in results:
+        generated.extend(derive_insights(result, strategy))
+    # A rewrite must not duplicate deterministic conclusions.
+    existing = {item.id for item in draft.insights}
+    draft.insights.extend(item for item in generated if item.id not in existing)
+    draft.insights = draft.insights[:12]
+    if generated:
+        draft.summary = _insight_summary(draft.summary, draft.insights)
+        draft.summary_evidence_refs = list(dict.fromkeys([
+            *draft.summary_evidence_refs,
+            *(ref for item in draft.insights for ref in item.evidence_refs),
+        ]))
+        draft.summary_evidence_pointers = list({
+            (pointer.evidence_id, pointer.row_index, pointer.field, pointer.raw_value, pointer.source_type): pointer
+            for item in draft.insights for pointer in item.evidence_pointers
+        }.values())
+    return draft
+
+
+@_with_evidence_scope
+def derive_insights_node(state: AnalysisState) -> dict[str, Any]:
+    """Compatibility wrapper for integrations using the previous graph."""
+    return {"draft": _derive_insights_for_draft(state, AnalysisDraft.model_validate(state.draft)).model_dump(mode="json")}
+
+
+def _insight_summary(summary: str, insights: list[Insight]) -> str:
+    """Keep the original evidence summary while adding a concise answer."""
+    conclusions = [item.conclusion for item in insights[:3] if item.conclusion]
+    if not conclusions:
+        return summary
+    prefix = "；".join(conclusions)
+    return f"{prefix}。{summary}" if prefix not in summary else summary
 
 
 @_with_evidence_scope
@@ -696,25 +748,35 @@ def validate_node(state: AnalysisState) -> dict[str, Any]:
             finding.evidence_pointers,
             require_evidence=True,
         ))
+    for index, insight in enumerate(draft.insights):
+        referenced.update(insight.evidence_refs)
+        issues.extend(_validate_claim(
+            state,
+            f"insights[{index}]",
+            f"{insight.title} {insight.conclusion} {insight.value or ''}",
+            insight.evidence_refs,
+            insight.evidence_pointers,
+            require_evidence=bool(insight.value or insight.evidence_refs),
+        ))
+        if not insight.significance:
+            issues.append(ValidationIssue(
+                code="insight_missing_significance", message=f"分析结论缺少影响说明：{insight.title}",
+                severity=Severity.ERROR, target=f"insights[{index}]",
+            ))
+        if insight.severity != Severity.INFO and not insight.action:
+            issues.append(ValidationIssue(
+                code="insight_missing_action", message=f"重要分析结论缺少可执行建议：{insight.title}",
+                severity=Severity.ERROR, target=f"insights[{index}]",
+            ))
     missing = referenced - available
     if missing:
         issues.append(ValidationIssue(code="unknown_evidence", message=f"引用了不存在的证据：{', '.join(sorted(missing))}", severity=Severity.ERROR))
     for chart in draft.charts:
         if chart.dataset_ref not in available:
             issues.append(ValidationIssue(code="unknown_chart_data", message=f"图表 {chart.title} 的数据证据不存在", severity=Severity.ERROR, target=chart.id))
-    for target, text in [
-        *[(f"assumptions[{index}]", item) for index, item in enumerate(draft.assumptions)],
-        *[(f"warnings[{index}]", item) for index, item in enumerate(draft.warnings)],
-        *[(f"suggested_questions[{index}]", item) for index, item in enumerate(draft.suggested_questions)],
-    ]:
-        numbers = _numeric_tokens(text, ignored_terms=evidence_field_names)
-        if numbers:
-            issues.append(ValidationIssue(
-                code="unreferenced_narrative_number",
-                message=f"无证据引用的说明文字包含数字：{', '.join(numbers)}",
-                severity=Severity.ERROR,
-                target=target,
-            ))
+    # Assumptions, warnings and follow-up questions are explanatory metadata.
+    # Numeric claims in the answer body remain strictly evidence-backed above,
+    # while dates/step counts in these narrative fields must not block delivery.
     if not draft.findings and not draft.metrics:
         issues.append(ValidationIssue(code="empty_result", message="分析结果没有指标或发现", severity=Severity.ERROR))
     report = ValidationReport(passed=not any(item.severity == Severity.ERROR for item in issues), issues=issues, checked_evidence_ids=sorted(referenced & available))
@@ -732,7 +794,7 @@ def validate_node(state: AnalysisState) -> dict[str, Any]:
 def reflect_node(state: AnalysisState) -> dict[str, Any]:
     revision_round = state.revision_round + 1
     repository.update_task(state.task_id, status=TaskStatus.REFLECTING, progress=88, status_message=f"正在进行第 {revision_round} 轮质量复核")
-    tracker = begin_node(state, "reflect")
+    tracker = start_node(state, "reflect")
     try:
         validation = ValidationReport.model_validate(state.validation)
         if not validation.passed:
@@ -756,19 +818,32 @@ def reflect_node(state: AnalysisState) -> dict[str, Any]:
                 ).model_dump(mode="json"),
                 "revision_round": revision_round,
             })
-        if (
-            _is_generic_analysis_request(state.user_question)
-            or any(r.get('arguments', {}).get('strategy') == 'overdue_ranking' for r in state.tool_results)
-            or (state.intent or {}).get('route') == 'derived_metric'
-            or _uses_sectioned_department_profit_result(state)
-        ) and validation.passed:
+        if _deterministic_strategy(state) and validation.passed:
+            strategy = _deterministic_strategy(state)
+            log_event(logger, "workflow.deterministic_quality_passed", task_id=state.task_id, run_id=state.run_id, strategy=strategy)
             return tracker.complete({
                 "reflection": ReflectionDecision(
                     verdict="pass",
                     route="finish",
-                    reason="确定性概览已通过数字和证据校验。",
+                    reason="确定性结果已通过数字和证据校验。",
                 ).model_dump(mode="json"),
                 "revision_round": revision_round,
+            })
+        current_draft_hash = _stable_hash(state.draft or {})
+        previous = state.reflection or {}
+        previous_issues = previous.get("issues") or []
+        current_issue_hash = _stable_hash(sorted(_stable_hash(issue) for issue in previous_issues))
+        if previous.get("verdict") == "revise" and state.last_review_draft_hash == current_draft_hash and state.last_review_issue_hash == current_issue_hash:
+            return tracker.complete({
+                "reflection": ReflectionDecision(
+                    verdict="revise", route="finish",
+                    reason="草稿和复核问题均未变化，已停止无效重写。",
+                    issues=[ReviewIssue.model_validate(issue) for issue in previous_issues],
+                ).model_dump(mode="json"),
+                "revision_round": settings.max_revision_rounds,
+                "last_review_draft_hash": current_draft_hash,
+                "last_review_issue_hash": current_issue_hash,
+                "draft": {**(state.draft or {}), "warnings": [*((state.draft or {}).get("warnings") or []), "复核意见无法通过当前证据和策略自动修复，已停止重复重写。"]},
             })
         reflection_context = _reflection_context(state, revision_round, row_limit=12)
         try:
@@ -801,62 +876,117 @@ def reflect_node(state: AnalysisState) -> dict[str, Any]:
                 route="finish",
                 reason="数字和证据的确定性校验已通过；模型质量复核输出格式异常，已采用校验结果完成。",
             )
-        return tracker.complete({"reflection": decision.model_dump(mode="json"), "revision_round": revision_round})
+        reflection = decision.model_dump(mode="json")
+        issue_hash = _stable_hash(sorted(_stable_hash(issue) for issue in reflection.get("issues", [])))
+        if reflection["verdict"] == "revise" and not any(issue.get("severity") == Severity.ERROR.value for issue in reflection.get("issues", [])):
+            reflection["verdict"] = "pass"
+            reflection["route"] = "finish"
+            reflection["reason"] = f"复核仅提出建议性改进，当前结果可交付：{reflection['reason']}"
+            current_draft = {**(state.draft or {}), "warnings": [*((state.draft or {}).get("warnings") or []), "质量复核提出了不影响当前结论的改进建议。"]}
+            return tracker.complete({"reflection": reflection, "revision_round": revision_round, "draft": current_draft, "last_review_draft_hash": current_draft_hash, "last_review_issue_hash": issue_hash})
+        return tracker.complete({"reflection": reflection, "revision_round": revision_round, "last_review_draft_hash": current_draft_hash, "last_review_issue_hash": issue_hash})
     except Exception as exc:
         tracker.fail(exc)
         raise
 
 
 def route_reflection(state: AnalysisState) -> str:
-    decision = ReflectionDecision.model_validate(state.reflection)
-    if decision.route == 'finish':
-        return 'finish'
-    if decision.verdict == "pass" or state.revision_round >= settings.max_revision_rounds:
-        return "finish"
-    return decision.route if decision.route in {"replan", "execute", "rewrite"} else "rewrite"
+    return route_reflection_impl(state)
+
+
+def route_validation(state: AnalysisState) -> str:
+    return route_validation_impl(state)
 
 
 def route_execute(state: AnalysisState) -> str:
-    plan = AnalysisPlan.model_validate(state.plan)
-    if any(step.id not in state.completed_step_ids for step in plan.steps):
-        return "execute"
-    if state.reflection and state.reflection.get("route") == "execute":
-        revision_step_id = f"revision_{state.revision_round}"
-        if revision_step_id not in state.completed_step_ids:
-            return "execute"
-    return "draft"
+    return route_execute_impl(state)
+
+
+def _delivery_gate(state: AnalysisState, draft: AnalysisDraft, validation: ValidationReport) -> DeliveryGate:
+    """Apply the product's hard delivery contract in one place."""
+    checks: list[DeliveryCheck] = []
+    successful = [item for item in state.tool_results if item.get("status") == "success"]
+    data_ready = bool(state.datasets) and bool(successful)
+    checks.append(DeliveryCheck(code="data_ready", label="数据可用", passed=data_ready,
+                                severity=Severity.ERROR if not data_ready else Severity.INFO,
+                                message="已读取可分析数据和计算结果。" if data_ready else "没有可用的数据或计算结果。"))
+
+    plan = state.plan or {}
+    requirements_covered = bool(plan) and plan.get("can_execute", True) and not (state.intent or {}).get("route") == "clarification"
+    checks.append(DeliveryCheck(code="requirements_covered", label="需求已覆盖", passed=requirements_covered,
+                                severity=Severity.ERROR if not requirements_covered else Severity.INFO,
+                                message="用户要求已映射到分析步骤。" if requirements_covered else "分析口径或必要字段仍需确认。"))
+
+    planned_steps = {str(step.get("id")) for step in plan.get("steps", []) if isinstance(step, dict)}
+    completed_steps = set(state.completed_step_ids)
+    calculations_complete = bool(successful) and (not planned_steps or planned_steps <= completed_steps)
+    checks.append(DeliveryCheck(code="calculations_complete", label="计算已完成", passed=calculations_complete,
+                                severity=Severity.ERROR if not calculations_complete else Severity.INFO,
+                                message="计划中的计算步骤已完成。" if calculations_complete else "仍有计算步骤未完成。"))
+
+    evidence_traceable = validation.passed and all(
+        item.evidence_refs and item.evidence_pointers for item in draft.insights if item.value is not None
+    )
+    checks.append(DeliveryCheck(code="evidence_traceable", label="证据可追溯", passed=evidence_traceable,
+                                severity=Severity.ERROR if not evidence_traceable else Severity.INFO,
+                                message="数字和结论均可追溯到证据或计算输入。" if evidence_traceable else "存在未通过证据校验的结论。"))
+
+    requested_single = (
+        (state.intent or {}).get("route") in {"derived_metric", "overdue_ranking"}
+        or any(item.get("arguments", {}).get("strategy") == "overdue_ranking" for item in state.tool_results)
+        or bool(re.search(r"只看|仅看|计算.*率|查询.*率", state.user_question))
+    )
+    required_insights = 1 if requested_single else 2
+    enough_insights = len(draft.insights) >= required_insights
+    checks.append(DeliveryCheck(code="new_information_present", label="产生新信息", passed=enough_insights,
+                                severity=Severity.ERROR if not enough_insights else Severity.INFO,
+                                message=f"已产生 {len(draft.insights)} 条分析结论，要求至少 {required_insights} 条。"))
+
+    actions_executable = enough_insights and all(item.significance and item.action for item in draft.insights[:required_insights])
+    checks.append(DeliveryCheck(code="actions_executable", label="结论可执行", passed=actions_executable,
+                                severity=Severity.ERROR if not actions_executable else Severity.INFO,
+                                message="重要结论均包含影响说明和建议。" if actions_executable else "重要结论缺少影响说明或执行建议。"))
+
+    unresolved_errors = sum(1 for issue in validation.issues if issue.severity == Severity.ERROR)
+    no_errors = unresolved_errors == 0
+    checks.append(DeliveryCheck(code="no_unresolved_errors", label="无未解决错误", passed=no_errors,
+                                severity=Severity.ERROR if not no_errors else Severity.INFO,
+                                message="没有未解决的证据错误。" if no_errors else f"仍有 {unresolved_errors} 项证据或数字错误。"))
+
+    if not data_ready or not requirements_covered:
+        status = TaskStatus.NEEDS_CLARIFICATION.value
+    elif not no_errors:
+        status = TaskStatus.NEEDS_REVIEW.value
+    elif not enough_insights or not actions_executable or not calculations_complete:
+        status = TaskStatus.NEEDS_REVIEW.value
+    elif draft.warnings:
+        status = TaskStatus.COMPLETED_WITH_WARNINGS.value
+    else:
+        status = TaskStatus.COMPLETED.value
+    return DeliveryGate(status=status, checks=checks,
+                        new_information_count=len(draft.insights), unresolved_error_count=unresolved_errors)
 
 
 def finish_node(state: AnalysisState) -> dict[str, Any]:
     draft = AnalysisDraft.model_validate(state.draft)
     validation = ValidationReport.model_validate(state.validation)
-    if not validation.passed:
-        message = "数字或证据校验未通过，已停止交付。具体问题：" + "；".join(i.message for i in validation.issues[:4])
+    gate = _delivery_gate(state, draft, validation)
+    draft.delivery = gate
+    if gate.status == TaskStatus.NEEDS_REVIEW.value:
+        message = "本次分析未达到交付条件：" + "；".join(check.message for check in gate.checks if not check.passed)[:800]
         if not state.is_replay:
             repository.add_message(state.task_id, "assistant", message)
         repository.update_task(
-            state.task_id, status=TaskStatus.FAILED, progress=88,
-            status_message="结果未通过证据校验", error=message,
+            state.task_id, status=TaskStatus.NEEDS_REVIEW, progress=95,
+            status_message="结果需要人工复核", error=message,
         )
-        return {"final_status": "failed", "error": message}
-    if state.revision_round >= settings.max_revision_rounds and state.reflection and state.reflection.get("verdict") != "pass":
-        draft.warnings.append("已达到三轮自动复核上限，请结合证据明细人工复核。")
-        message = "自动质量复核达到上限，草稿已保留，但不会作为正式分析结果交付。"
-        repository.update_task(
-            state.task_id,
-            status=TaskStatus.NEEDS_REVIEW,
-            progress=95,
-            status_message="结果需要人工复核",
-            error=message,
-        )
-        return {
-            "draft": draft.model_dump(mode="json"),
-            "final_status": TaskStatus.NEEDS_REVIEW.value,
-            "error": message,
-        }
-    final_status = (
-        TaskStatus.COMPLETED_WITH_WARNINGS if draft.warnings else TaskStatus.COMPLETED
-    )
+        return {"draft": draft.model_dump(mode="json"), "final_status": gate.status, "error": message}
+    if state.revision_round >= settings.max_revision_rounds and state.reflection and state.reflection.get("verdict") != "pass" and validation.passed:
+        warning = "自动复核已达到上限；数字和证据校验通过，结果按警告状态交付。"
+        if warning not in draft.warnings:
+            draft.warnings.append(warning)
+        gate.status = TaskStatus.COMPLETED_WITH_WARNINGS.value
+    final_status = TaskStatus(gate.status)
     if not state.is_replay:
         repository.add_message(state.task_id, "assistant", draft.summary)
     repository.update_task(
@@ -897,6 +1027,7 @@ def _draft_context(
     return {
         "user_question": state.user_question,
         "analysis_plan": state.plan,
+        "previous_result": state.previous_result or {},
         "confirmed_policies": {},
         "knowledge_context": state.knowledge_context,
         "verified_results": _verified_result_catalog(state),
@@ -1010,6 +1141,12 @@ def _query_spec_from_arguments(
         if len(candidates) != 1:
             raise ToolError("查询未指定数据集，且字段不能唯一映射到一个数据集")
         normalized["dataset_id"] = candidates[0].id
+    raw_limit = normalized.get("limit")
+    try:
+        limit = int(raw_limit) if raw_limit is not None else 100
+    except (TypeError, ValueError):
+        limit = 100
+    normalized["limit"] = min(max(limit, 1), settings.max_query_rows)
     try:
         return QuerySpec.model_validate(normalized)
     except Exception as exc:
@@ -1050,6 +1187,25 @@ def _is_generic_analysis_request(question: str) -> bool:
         "分析一下数据", "看看数据", "帮我看看数据", "看一下数据", "分析报表",
         "分析表格", "分析报告", "帮我分析报表", "帮我分析表格",
     }
+
+
+def _deterministic_strategy(state: AnalysisState) -> str | None:
+    if _latest_strategy_result(state, "overdue_ranking"):
+        return "overdue_ranking"
+    route = (state.intent or {}).get("route")
+    if route == "derived_metric":
+        return "derived_metric"
+    if any(item.get("arguments", {}).get("strategy") == "financial_report" for item in state.tool_results):
+        return "financial_report"
+    if _uses_sectioned_department_profit_result(state):
+        return "sectioned_department_profit"
+    if _is_generic_analysis_request(state.user_question):
+        return "generic_overview"
+    return None
+
+
+def _stable_hash(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
 
 def _normalize_plan_for_request(plan: AnalysisPlan, question: str) -> AnalysisPlan:
@@ -1328,7 +1484,9 @@ def _generic_overview_draft(state: AnalysisState) -> AnalysisDraft | None:
         if (value := _numeric_float(row.get(measure))) is not None
     ]
     total_field = next((name for name in columns if name in {"范围合计", "总计", "合计"}), None)
-    total_value = _numeric_float(rows[0].get(total_field)) if total_field else (sum(numeric_values) if numeric_values else None)
+    # A calculated sum is not an original evidence cell.  Do not present it as
+    # a cell-backed metric; the report can still show the grouped values.
+    total_value = _numeric_float(rows[0].get(total_field)) if total_field else None
     negative_count = sum(1 for value in numeric_values if value < 0)
 
     findings: list[Finding] = []
@@ -1436,7 +1594,7 @@ def _generic_overview_draft(state: AnalysisState) -> AnalysisDraft | None:
             continue
         extra_total = _numeric_float(extra_rows[0].get("范围合计"))
         if extra_total is None:
-            extra_total = sum(value for row in extra_rows if (value := _numeric_float(row.get(extra_measure))) is not None)
+            continue
         draft.metrics.append(Metric(
             label=f"{extra_measure}合计（{extra_dimension}）",
             value=_format_number(extra_total),
@@ -1582,8 +1740,10 @@ def prepare_context_node(state: AnalysisState) -> dict[str, Any]:
         return {}
     started_at = time.perf_counter()
     run = repository.get_run_by_id(state.run_id)
-    snapshot = repository.get_task(state.task_id)
-    messages = [item for item in snapshot.messages if item.sequence <= run.message_sequence]
+    messages = [MessageRecord.model_validate(item) for item in state.conversation_messages]
+    if not messages:
+        snapshot = repository.get_task(state.task_id)
+        messages = [item for item in snapshot.messages if item.sequence <= run.message_sequence]
     conversation, _budget = context_manager.prepare(
         state.task_id, messages, current_question=state.user_question,
         dynamic_context={'datasets': [
@@ -1598,34 +1758,45 @@ def prepare_context_node(state: AnalysisState) -> dict[str, Any]:
 
 
 def build_graph():
+    def cancellable(node_name: str, node):
+        def wrapped(state: AnalysisState):
+            if repository.is_execution_cancelled(state.run_id):
+                raise AnalysisCancelled(f"分析已由用户中止（{node_name}）")
+            result = node(state)
+            if repository.is_execution_cancelled(state.run_id):
+                raise AnalysisCancelled(f"分析已由用户中止（{node_name}）")
+            return result
+        return wrapped
+
     builder = StateGraph(AnalysisState)
-    builder.add_node("classify", classify_node)
-    builder.add_node("prepare_context", prepare_context_node)
-    builder.add_node("off_topic", off_topic_node)
-    builder.add_node("plan", plan_node)
-    builder.add_node("clarify", clarify_node)
-    builder.add_node("execute", execute_node)
-    builder.add_node("draft", draft_node)
-    builder.add_node("validate", validate_node)
-    builder.add_node("reflect", reflect_node)
-    builder.add_node("finish", finish_node)
+    builder.add_node("classify", cancellable("classify", classify_node_impl))
+    builder.add_node("prepare_context", cancellable("prepare_context", prepare_context_node))
+    builder.add_node("respond", cancellable("respond", respond_node_impl))
+    builder.add_node("plan", cancellable("plan", plan_node))
+    builder.add_node("clarify", cancellable("clarify", clarify_node))
+    builder.add_node("execute", cancellable("execute", execute_node))
+    builder.add_node("draft", cancellable("draft", draft_node))
+    builder.add_node("validate", cancellable("validate", validate_node))
+    # Kept as a resume-compatible entry for runs created by older versions;
+    # new runs never route through it.
+    builder.add_node("reflect", cancellable("reflect", reflect_node))
+    builder.add_node("finish", cancellable("finish", finish_node))
     builder.add_conditional_edges(
         START,
         lambda state: state.entry_node,
         {"classify": "classify", "plan": "plan", "execute": "execute", "draft": "draft", "reflect": "reflect"},
     )
-    builder.add_conditional_edges("classify", route_intent, {"plan": "prepare_context", "off_topic": "off_topic"})
+    builder.add_conditional_edges("classify", route_intent_impl, {"plan": "prepare_context", "off_topic": "respond"})
     builder.add_edge("prepare_context", "plan")
-    builder.add_edge("off_topic", END)
-    builder.add_conditional_edges("plan", route_plan, {"execute": "execute", "clarify": "clarify"})
+    builder.add_edge("respond", END)
+    builder.add_conditional_edges("plan", route_plan_impl, {"execute": "execute", "clarify": "clarify"})
     builder.add_edge("clarify", END)
-    builder.add_conditional_edges("execute", route_execute, {"execute": "execute", "draft": "draft"})
+    builder.add_conditional_edges("execute", route_execute_impl, {"execute": "execute", "draft": "draft"})
+    # Deterministic validation is the normal quality gate.  The historical
+    # reflection node remains callable for compatibility, but is no longer on
+    # the default graph and cannot create a retry loop.
     builder.add_edge("draft", "validate")
-    builder.add_edge("validate", "reflect")
-    builder.add_conditional_edges(
-        "reflect", route_reflection,
-        {"finish": "finish", "replan": "plan", "execute": "execute", "rewrite": "draft"},
-    )
+    builder.add_conditional_edges("validate", route_validation_impl, {"finish": "finish", "reflect": "reflect"})
     builder.add_edge("finish", END)
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(settings.checkpoint_db, check_same_thread=False)
@@ -1664,11 +1835,11 @@ def run_analysis(run_id: str) -> None:
             run_id=run_id,
             user_question=question,
             conversation_summary=conversation.model_dump(mode="json"),
+            conversation_messages=[item.model_dump(mode="json") for item in messages],
+            previous_result=snapshot.result.model_dump(mode="json") if snapshot.result else None,
             datasets=[item.model_dump(mode="json") for item in snapshot.datasets],
             confirmed_relationships=[item.model_dump(mode="json") for item in snapshot.relationships if item.status == "confirmed"],
         )
-        if not settings.model_intent_enabled:
-            initial = initial.model_copy(update=prepare_context_node(initial))
         result = graph.invoke(initial, config={"configurable": {"thread_id": run_id}})
         final_status = str(result.get("final_status") or repository.get_task(task_id).status.value)
         has_draft = final_status in {
@@ -1688,13 +1859,16 @@ def run_analysis(run_id: str) -> None:
             activated=activate,
             duration_ms=duration_ms(started_at),
         )
+    except AnalysisCancelled:
+        log_event(logger, "analysis.cancelled", task_id=task_id, run_id=run_id,
+                  duration_ms=duration_ms(started_at))
     except LLMError as exc:
         if isinstance(exc, LLMUnavailableError):
             message = '本地模型暂时不可用，请检查模型服务后重试。原报告未受影响。'
         elif isinstance(exc, LLMContextOverflowError):
             message = '本次请求超出模型上下文容量，请缩短问题或缩小分析范围。原报告未受影响。'
         else:
-            message = '本次请求的模型输出未能可靠解析，请明确问题或稍后重试。详细原因见节点记录。'
+            message = '本次请求的模型输出未能可靠解析，请明确问题、缩小分析范围或稍后重试。'
         repository.finish_execution(run_id, "failed", message)
         repository.restore_active_run_after_failure(task_id, run_id, message)
         log_event(logger, "analysis.failed", task_id=task_id, run_id=run_id, error_type=type(exc).__name__, duration_ms=duration_ms(started_at))
@@ -1705,101 +1879,3 @@ def run_analysis(run_id: str) -> None:
             "analysis.failed",
             extra={"event_fields": {"event": "analysis.failed", "task_id": task_id, "run_id": run_id, "error_type": type(exc).__name__, "duration_ms": duration_ms(started_at)}},
         )
-
-
-def run_replay(run_id: str) -> None:
-    run = repository.get_run_by_id(run_id)
-    if not run.forked_from_node_execution_id or not run.prompt_version_id:
-        raise ValueError("重跑记录缺少来源节点或提示词版本")
-    try:
-        repository.assert_run_context_current(run.task_id, run.id)
-    except ValueError as exc:
-        repository.finish_execution(run.id, "failed", str(exc))
-        repository.restore_active_run_after_failure(run.task_id, run.id, str(exc))
-        return
-    source = repository.get_node_execution(run.task_id, run.forked_from_node_execution_id)
-    payload = _migrate_state(source.input_state, source.state_schema_version)
-    versions = repository.prompt_versions_for_run(source.run_id)
-    versions[source.node_name] = run.prompt_version_id
-    payload.update(
-        {
-            "schema_version": 3,
-            "task_id": run.task_id,
-            "run_id": run.id,
-            "user_question": run.question,
-            "entry_node": source.node_name,
-            "is_replay": True,
-            "prompt_versions": versions,
-            "final_status": None,
-            "error": None,
-        }
-    )
-    state = AnalysisState.model_validate(payload)
-    if source.node_name == 'classify':
-        state.context_prepared = False
-        state.knowledge_context = []
-    if not repository.mark_execution_running(run.id):
-        return
-    repository.update_task(
-        run.task_id,
-        status=_entry_status(source.node_name),
-        progress=_entry_progress(source.node_name),
-        status_message=f"正在从{_node_label(source.node_name)}重新分析",
-        clear_error=True,
-        event_type="run.replay_started",
-        payload={"run_id": run.id, "source_node_execution_id": source.id},
-    )
-    try:
-        result = graph.invoke(state, config={"configurable": {"thread_id": run.id}})
-        final_status = str(result.get("final_status") or repository.get_task(run.task_id).status.value)
-        has_draft = final_status in {
-            TaskStatus.COMPLETED.value,
-            TaskStatus.COMPLETED_WITH_WARNINGS.value,
-            TaskStatus.NEEDS_REVIEW.value,
-        }
-        draft = AnalysisDraft.model_validate(result["draft"]) if has_draft else None
-        activate = _should_auto_activate(result, final_status)
-        repository.finish_execution(run.id, final_status, result.get("error"), draft, activate=activate)
-        if final_status in {TaskStatus.FAILED.value, TaskStatus.OFF_TOPIC.value, TaskStatus.NEEDS_CLARIFICATION.value}:
-            repository.restore_active_run_after_failure(
-                run.task_id, run.id, result.get("error") or f"重跑终止状态：{final_status}"
-            )
-    except Exception as exc:
-        repository.finish_execution(run.id, "failed", str(exc))
-        repository.restore_active_run_after_failure(run.task_id, run.id, str(exc))
-
-
-def _migrate_state(payload: dict[str, Any], schema_version: int) -> dict[str, Any]:
-    migrated = dict(payload)
-    if schema_version < 2 and isinstance(migrated.get("conversation_summary"), str):
-        migrated["conversation_summary"] = {
-            "memory": None,
-            "recent_messages": [
-                {
-                    "id": "legacy-summary",
-                    "role": "system",
-                    "content": migrated["conversation_summary"],
-                    "created_at": "1970-01-01T00:00:00+00:00",
-                    "sequence": 0,
-                }
-            ],
-        }
-    return migrated
-
-
-def _entry_status(node_name: str) -> TaskStatus:
-    return {
-        "classify": TaskStatus.CLASSIFYING,
-        "plan": TaskStatus.PLANNING,
-        "execute": TaskStatus.EXECUTING,
-        "draft": TaskStatus.EXECUTING,
-        "reflect": TaskStatus.REFLECTING,
-    }[node_name]
-
-
-def _entry_progress(node_name: str) -> int:
-    return {"classify": 20, "plan": 35, "execute": 55, "draft": 70, "reflect": 88}[node_name]
-
-
-def _node_label(node_name: str) -> str:
-    return {"classify": "意图分类", "plan": "分析计划", "execute": "工具调度", "draft": "草稿生成", "reflect": "反思复核"}[node_name]

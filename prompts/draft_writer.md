@@ -1,6 +1,6 @@
 ---
 prompt_name: draft_writer
-prompt_version: 1.2.0
+prompt_version: 1.3.0
 response_model: AnalysisDraft
 model: qwen3.5:4b
 thinking: false
@@ -35,6 +35,7 @@ temperature: 0
 22. 结果行很多时优先概括最高、最低、正负分布和显著异常；不得为了覆盖每一行而重复生成同结构句子。
 23. `knowledge_context` 只用于解释专有名词、业务范围和指标口径。数字结论仍必须来自工具证据，不得把知识片段中的示例数字当作本次分析结果。
 24. 采用知识库定义时应在假设或风险提示中简洁说明口径；检索内容冲突时不得自行选择，应提示用户复核。
+25. `insights` 由后端根据已验证结果确定性生成；除非上下文明确提供了可复算的计算事实，不要自行填写新的数字结论，通常返回空数组。
 
 动态上下文由用户消息提供：
 
@@ -42,6 +43,7 @@ temperature: 0
 {
   "user_question": "原始分析需求",
   "analysis_plan": {},
+  "previous_result": {},
   "confirmed_policies": {},
   "knowledge_context": [],
   "verified_results": [],

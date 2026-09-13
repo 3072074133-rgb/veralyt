@@ -727,6 +727,14 @@ def _read_csv(path: Path) -> pl.DataFrame:
     if match is None:
         raise IngestionError("无法识别 CSV 文件编码")
     text = str(match)
+    # charset-normalizer can mistake short GB18030 files for another multibyte codec.
+    # Prefer a valid GB18030 decode when it yields readable CJK text.
+    try:
+        gb_text = raw.decode("gb18030")
+        if any("\u4e00" <= ch <= "\u9fff" for ch in gb_text):
+            text = gb_text
+    except UnicodeDecodeError:
+        pass
     try:
         dialect = csv.Sniffer().sniff(text[:8192], delimiters=",;\t|")
         delimiter = dialect.delimiter

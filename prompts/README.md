@@ -9,8 +9,9 @@ users and financial vocabulary are Chinese.
 | Workflow node | Prompt file | Output contract | Thinking |
 | --- | --- | --- | --- |
 | Intent classification | `intent_classifier.md` | `IntentDecision` | Off |
-| Requirement interpretation and planning | `analysis_planner.md` | `AnalysisPlan` | On |
-| Query specification | `tool_orchestrator.md` | `QueryRequest` for the planner-selected dataset | On |
+| Direct answer | `direct_answer.md` | Plain text | Off |
+| Requirement interpretation and planning | `analysis_planner.md` | `PlanDecision` | On |
+| Query specification | `tool_orchestrator.md` | `QueryDecision` for the planner-selected dataset | On |
 | Draft generation | `draft_writer.md` | `AnalysisDraft` | Off |
 | Reflection review | `reflection_reviewer.md` | `ReflectionDecision` | On |
 | Conversation summarization | `conversation_summarizer.md` | `ConversationMemory` | Off |
@@ -26,7 +27,7 @@ The following workflow nodes are deterministic and must not call an LLM:
 - deterministic result validation
 - revision routing and retry-budget checks
 - final API response assembly
-- off-topic response and end
+- direct answer and end
 
 ## Runtime assembly
 
@@ -39,7 +40,7 @@ Ollama's `format` parameter and validate the returned content again with
 `model_validate_json`. Set `extra="forbid"` on all response models.
 
 For query-generation steps, expose only the planner-selected dataset schema.
-The model returns a typed `QueryRequest`; the application binds the trusted
+The model returns a typed `QueryDecision`; the application binds the trusted
 dataset ID, validates the specification, executes the query, and wraps the
 result before updating graph state.
 
@@ -58,7 +59,8 @@ All node implementations must enforce these rules outside the prompt as well:
    assumptions, issues, tool calls, and evidence references only.
 6. Invalid structured output gets one repair attempt. A second failure ends the
    node with a typed error.
-7. Reflection is capped by workflow state, initially at three rounds.
+7. The default graph does not run reflection. The legacy reflection entry is
+   retained only so older interrupted runs can be resumed safely.
 
 ## Versioning
 

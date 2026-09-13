@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { BookOpen, Database, Download, FileSpreadsheet, GitBranch, Link2, Paperclip, RefreshCw, Send, X } from 'lucide-vue-next'
+import { BookOpen, Database, Download, FileSpreadsheet, Link2, Paperclip, RefreshCw, Send, X } from 'lucide-vue-next'
 import { ElMessage } from 'element-plus'
 import 'element-plus/es/components/message/style/css'
 import AnalysisChart from '../components/AnalysisChart.vue'
@@ -10,11 +10,9 @@ import { buildConversationTurns, resolveRetryQuestion, type ConversationTurn } f
 import { useTaskStore } from '../stores/task'
 
 const EvidenceDrawer = defineAsyncComponent(() => import('../components/EvidenceDrawer.vue'))
-const NodeReplayDrawer = defineAsyncComponent(() => import('../components/NodeReplayDrawer.vue'))
 const DatasetWorkspace = defineAsyncComponent(() => import('../components/DatasetWorkspace.vue'))
 const DataSourceDrawer = defineAsyncComponent(() => import('../components/DataSourceDrawer.vue'))
 const KnowledgeBindingDrawer = defineAsyncComponent(() => import('../components/KnowledgeBindingDrawer.vue'))
-const RunArtifacts = defineAsyncComponent(() => import('../components/RunArtifacts.vue'))
 
 const route = useRoute()
 const router = useRouter()
@@ -22,7 +20,6 @@ const store = useTaskStore()
 const prompt = ref('')
 const input = ref<HTMLInputElement>()
 const drawerOpen = ref(false)
-const nodeDrawerOpen = ref(false)
 const sourceDrawerOpen = ref(false)
 const knowledgeDrawerOpen = ref(false)
 const datasetWorkspaceOpen = ref(false)
@@ -32,7 +29,7 @@ const chartLoading = ref<Record<string, boolean>>({})
 const chartErrors = ref<Record<string, string>>({})
 const relationSaving = ref(false)
 
-const terminal = new Set(['ready', 'off_topic', 'needs_clarification', 'needs_review', 'completed_with_warnings', 'completed', 'failed'])
+const terminal = new Set(['ready', 'off_topic', 'needs_clarification', 'needs_review', 'completed_with_warnings', 'completed', 'failed', 'cancelled'])
 const canSend = computed(() => !!prompt.value.trim() && !!store.task?.files.some((file) => file.status === 'ready') && !store.isRunning)
 const sourceCount = computed(() => (store.task?.files.length ?? 0) + store.uploadFailures.length)
 const conversationTurns = computed(() => buildConversationTurns(
@@ -41,10 +38,6 @@ const conversationTurns = computed(() => buildConversationTurns(
   store.task?.pending_run_id,
   store.task?.active_run_id,
 ))
-const steps = [
-  ['解析文件', 15], ['理解需求', 35], ['执行计算', 70], ['校验结果', 88], ['生成报告', 100],
-]
-
 onMounted(() => initialize())
 watch(() => route.params.id, () => initialize())
 onBeforeUnmount(() => store.closeEvents())
@@ -143,10 +136,13 @@ async function openEvidence(id?: string) {
   try { await store.openEvidence(id); drawerOpen.value = true }
   catch (reason) { ElMessage.error(reason instanceof Error ? reason.message : '证据加载失败') }
 }
-async function refreshAfterBranchChange() { if (store.task) await store.loadTask(store.task.id) }
 async function cancelQueuedRun() {
   try { await store.cancelQueuedRun(); ElMessage.success('已取消排队中的分析') }
   catch { ElMessage.error(store.error || '取消失败') }
+}
+async function stopCurrentRun() {
+  try { await store.stopCurrentRun(); ElMessage.success('已中止当前分析') }
+  catch { ElMessage.error(store.error || '中止失败') }
 }
 async function publishReport() {
   if (!store.task) return
@@ -186,7 +182,6 @@ function openDatasetWorkspace(datasetId?: string) {
       <div class="top-actions" v-if="store.task && sourceCount">
         <button class="button source-trigger" @click="sourceDrawerOpen=true"><Database :size="16" />数据来源 <span>{{ sourceCount }}</span></button>
         <button class="button source-trigger" @click="knowledgeDrawerOpen=true"><BookOpen :size="16" />知识库 <span>{{ store.task.knowledge_bases.length }}</span></button>
-        <button v-if="terminal.has(store.task.status) && store.task.files.length" class="button" @click="nodeDrawerOpen=true"><GitBranch :size="16" />节点记录</button>
         <button v-if="terminal.has(store.task.status) && store.task.result" class="button" @click="publishReport"><Download :size="16" />发布报告</button>
         <button v-if="terminal.has(store.task.status) && store.task.result" class="button primary" @click="download('excel')"><Download :size="16" />Excel 结果</button>
       </div>
@@ -218,13 +213,9 @@ function openDatasetWorkspace(datasetId?: string) {
       <section v-for="turn in conversationTurns" :key="turn.user.id" class="conversation-turn">
         <div class="user-message">{{ turn.user.content }}</div>
 
-        <section v-if="store.isRunning && isPendingTurn(turn)" class="progress-panel">
-          <div class="progress-head"><div><h2>{{ store.task?.status_message }}</h2><p v-if="store.task?.queue_position && store.task.queue_position > 0">当前队列位置：{{ store.task.queue_position }}</p><p v-else>智能体正在根据数据证据计算并复核结果。</p></div><div><strong>{{ store.task?.progress }}%</strong><button v-if="store.task?.queue_position && store.task.queue_position > 0" class="button" @click="cancelQueuedRun"><X :size="15" />取消排队</button></div></div>
-          <div class="progress-bar"><span :style="{width: `${store.task?.progress}%`}" /></div>
-          <div class="progress-steps"><div v-for="[name, threshold] in steps" :key="name" :class="{done: (store.task?.progress ?? 0) >= Number(threshold), active: (store.task?.progress ?? 0) < Number(threshold) && (store.task?.progress ?? 0) >= Number(threshold) - 20}"><i />{{ name }}</div></div>
+        <section v-if="store.isRunning && isPendingTurn(turn)" class="progress-panel compact-progress">
+          <div class="progress-head"><div><h2>{{ store.task?.queue_position && store.task.queue_position > 0 ? '正在排队' : '正在思考' }}</h2><p v-if="store.task?.queue_position && store.task.queue_position > 0">当前队列位置：{{ store.task.queue_position }}</p><p v-else>可以随时中止本次请求。</p></div><div><button v-if="store.task?.queue_position && store.task.queue_position > 0" class="button" @click="cancelQueuedRun"><X :size="15" />取消排队</button><button v-else-if="store.task?.pending_run_id && store.task.queue_position === 0" class="button danger" @click="stopCurrentRun"><X :size="15" />中止分析</button></div></div>
         </section>
-
-        <RunArtifacts v-if="turn.run" :task-id="store.task!.id" :run-id="turn.run.id" :status="turn.run.status" @open-evidence="openEvidence" />
 
         <div v-if="!isActiveTurn(turn) && !(turn.run?.status === 'needs_clarification' && store.task?.status === 'needs_clarification')" class="assistant-messages">
           <div v-for="message in turn.assistantMessages" :key="message.id" class="assistant-message">{{ message.content }}</div>
@@ -236,23 +227,23 @@ function openDatasetWorkspace(datasetId?: string) {
         </section>
 
         <section v-if="turn.run?.status === 'failed'" class="notice-panel danger">
-          <h2>本次请求没有完成</h2><p>{{ /IntentDecision|validation errors|JSON Schema/.test(turn.run.error || '') ? '本次问题未能可靠识别，请明确要查询的指标。详细错误可在节点记录中查看。' : turn.run.error || store.error || '本轮请求执行失败' }}</p>
+          <h2>本次请求没有完成</h2><p>{{ /IntentDecision|validation errors|JSON Schema/.test(turn.run.error || '') ? '本次问题未能可靠识别，请明确要查询的指标。详细错误请重试或缩小分析范围。' : turn.run.error || store.error || '本轮请求执行失败' }}</p>
           <button class="button primary" :disabled="store.isRunning" @click="submit(resolveRetryQuestion(turn, conversationTurns))"><RefreshCw :size="16" />重新分析</button>
         </section>
 
         <section v-if="turn.run?.status === 'needs_review'" class="notice-panel review">
           <h2>结果需要人工复核</h2><p>{{ turn.run.error }}</p>
-          <button class="button" @click="nodeDrawerOpen=true"><GitBranch :size="16" />查看运行草稿</button>
         </section>
 
         <div v-if="isActiveTurn(turn) && store.task?.result" class="result-view">
         <header class="result-title"><div><h2>{{ store.task.result.title }}</h2><p>{{ store.task.result.summary }}</p></div><button class="button" @click="prompt='继续分析：'">继续追问</button></header>
+        <section v-if="store.task.result.insights?.length" class="result-panel insights-panel"><header><strong>关键结论</strong><span>{{ store.task.result.insights.length }} 条</span></header><div class="insight-list"><article v-for="insight in store.task.result.insights" :key="insight.id" :class="['insight-card', insight.severity]"><div class="insight-head"><strong>{{ insight.title }}</strong><em>{{ insight.severity === 'error' ? '需处理' : insight.severity === 'warning' ? '关注' : '结论' }}</em></div><p>{{ insight.conclusion }}</p><small>{{ insight.significance }}</small><div v-if="insight.action" class="insight-action"><b>建议</b>{{ insight.action }}</div><button v-if="insight.evidence_refs[0]" class="text-button" @click="openEvidence(insight.evidence_refs[0])">查看证据{{ insight.formula ? ` · ${insight.formula}` : '' }}</button></article></div></section>
         <section v-if="store.task.result.metrics.length" class="metrics-row">
           <button v-for="metric in store.task.result.metrics" :key="metric.label" @click="openEvidence(metric.evidence_refs[0])"><small>{{ metric.label }}</small><strong>{{ metric.value }}</strong><span :class="metric.direction">{{ metric.change }}</span></button>
         </section>
         <div class="result-grid">
           <section v-for="chart in store.task.result.charts" :key="chart.id" class="result-panel chart-panel"><header><strong>{{ chart.title }}</strong><span>{{ chart.unit }}</span></header><AnalysisChart :spec="chart" :evidence="chartEvidence[chart.dataset_ref]" :loading="chartLoading[chart.dataset_ref]" :error="chartErrors[chart.dataset_ref]" /></section>
-          <section class="result-panel findings-panel"><header><strong>关键发现</strong><span>{{ store.task.result.findings.length }} 条</span></header><ol><li v-for="finding in store.task.result.findings" :key="finding.title"><button @click="openEvidence(finding.evidence_refs[0])"><strong>{{ finding.title }}</strong><span>{{ finding.detail }}</span></button></li></ol></section>
+          <details class="result-panel findings-panel"><summary><strong>原始发现</strong><span>{{ store.task.result.findings.length }} 条</span></summary><ol><li v-for="finding in store.task.result.findings" :key="finding.title"><button @click="openEvidence(finding.evidence_refs[0])"><strong>{{ finding.title }}</strong><span>{{ finding.detail }}</span></button></li></ol></details>
         </div>
         <section class="result-panel method-panel"><header><strong>口径、来源与风险提示</strong><span>结果已完成自动复核</span></header><div><article><strong>数据与知识来源</strong><p>{{ store.task.files.map((file) => file.original_name).join('、') }}，共 {{ store.task.files.reduce((sum, file) => sum + file.row_count, 0).toLocaleString() }} 行。<template v-if="store.task.knowledge_bases.length">知识库：{{ store.task.knowledge_bases.map((item) => `${item.knowledge_base_name} v${item.revision_number}`).join('、') }}。</template></p></article><article><strong>关键假设</strong><p>{{ store.task.result.assumptions.join('；') || '未使用额外假设。' }}</p></article><article><strong>风险提示</strong><p>{{ store.task.result.warnings.join('；') || '未发现需要单独提示的风险。' }}</p></article><article><strong>完成时间</strong><p>{{ formatTime(turn.run?.finished_at ?? store.task.updated_at) }}</p></article></div></section>
         <details v-if="store.task.result.calculation_details?.length" class="result-panel calculation-panel">
@@ -285,7 +276,6 @@ function openDatasetWorkspace(datasetId?: string) {
     <EvidenceDrawer :open="drawerOpen" :evidence="store.evidence" @close="drawerOpen=false" />
     <DataSourceDrawer :open="sourceDrawerOpen" :files="store.task?.files ?? []" :datasets="store.task?.datasets ?? []" :upload-failures="store.uploadFailures" :running="store.isRunning" @close="sourceDrawerOpen=false" @add-files="input?.click()" @open-workspace="openDatasetWorkspace" />
     <KnowledgeBindingDrawer :open="knowledgeDrawerOpen" :task-id="store.task?.id" :bindings="store.task?.knowledge_bases ?? []" :running="store.isRunning" @close="knowledgeDrawerOpen=false" @updated="refreshAfterKnowledgeChange" />
-    <NodeReplayDrawer :open="nodeDrawerOpen" :task-id="store.task?.id" :active-run-id="store.task?.active_run_id" :running="store.isRunning" @close="nodeDrawerOpen=false" @replayed="refreshAfterBranchChange" @activated="refreshAfterBranchChange" />
     <DatasetWorkspace :open="datasetWorkspaceOpen" :task-id="store.task?.id" :datasets="store.task?.datasets ?? []" :initial-dataset-id="workspaceInitialDatasetId" :running="store.isRunning" @close="datasetWorkspaceOpen=false" @published="refreshAfterDatasetChange" />
   </main>
 </template>

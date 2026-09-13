@@ -1167,164 +1167,6 @@
         }
       }
     },
-    "/api/v1/tasks/{task_id}/runs/{run_id}/nodes": {
-      "get": {
-        "summary": "List Run Nodes",
-        "operationId": "list_run_nodes_api_v1_tasks__task_id__runs__run_id__nodes_get",
-        "parameters": [
-          {
-            "name": "task_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Task Id"
-            }
-          },
-          {
-            "name": "run_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Run Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/NodeExecutionSummary"
-                  },
-                  "title": "Response List Run Nodes Api V1 Tasks  Task Id  Runs  Run Id  Nodes Get"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/tasks/{task_id}/nodes/{execution_id}": {
-      "get": {
-        "summary": "Get Node Execution",
-        "operationId": "get_node_execution_api_v1_tasks__task_id__nodes__execution_id__get",
-        "parameters": [
-          {
-            "name": "task_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Task Id"
-            }
-          },
-          {
-            "name": "execution_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Execution Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/NodeExecutionDetail"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/tasks/{task_id}/nodes/{execution_id}/replay": {
-      "post": {
-        "summary": "Replay Node",
-        "operationId": "replay_node_api_v1_tasks__task_id__nodes__execution_id__replay_post",
-        "parameters": [
-          {
-            "name": "task_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Task Id"
-            }
-          },
-          {
-            "name": "execution_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Execution Id"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ReplayNodeRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "202": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ReplayNodeResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/v1/tasks/{task_id}/runs/{run_id}/activate": {
       "post": {
         "summary": "Activate Run",
@@ -1866,6 +1708,23 @@
             },
             "type": "array",
             "title": "Calculation Details"
+          },
+          "insights": {
+            "items": {
+              "$ref": "#/components/schemas/Insight"
+            },
+            "type": "array",
+            "title": "Insights"
+          },
+          "delivery": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeliveryGate"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "verification_level": {
             "type": "string",
@@ -2981,6 +2840,80 @@
         ],
         "title": "DatasetRevision"
       },
+      "DeliveryCheck": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "title": "Code"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "passed": {
+            "type": "boolean",
+            "title": "Passed"
+          },
+          "severity": {
+            "$ref": "#/components/schemas/Severity"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "code",
+          "label",
+          "passed",
+          "severity",
+          "message"
+        ],
+        "title": "DeliveryCheck"
+      },
+      "DeliveryGate": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "completed",
+              "completed_with_warnings",
+              "needs_clarification",
+              "needs_review",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Status"
+          },
+          "checks": {
+            "items": {
+              "$ref": "#/components/schemas/DeliveryCheck"
+            },
+            "type": "array",
+            "title": "Checks"
+          },
+          "new_information_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "New Information Count",
+            "default": 0
+          },
+          "unresolved_error_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Unresolved Error Count",
+            "default": 0
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "title": "DeliveryGate"
+      },
       "EvidencePointer": {
         "properties": {
           "evidence_id": {
@@ -3010,6 +2943,33 @@
               }
             ],
             "title": "Unit"
+          },
+          "source_type": {
+            "type": "string",
+            "enum": [
+              "cell",
+              "derived"
+            ],
+            "title": "Source Type",
+            "default": "cell"
+          },
+          "formula": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Formula"
+          },
+          "input_pointers": {
+            "items": {
+              "$ref": "#/components/schemas/EvidencePointer"
+            },
+            "type": "array",
+            "title": "Input Pointers"
           }
         },
         "additionalProperties": false,
@@ -3173,6 +3133,119 @@
         },
         "type": "object",
         "title": "HTTPValidationError"
+      },
+      "Insight": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "ratio",
+              "change",
+              "comparison",
+              "ranking",
+              "contribution",
+              "anomaly",
+              "risk",
+              "reconciliation"
+            ],
+            "title": "Type"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "conclusion": {
+            "type": "string",
+            "title": "Conclusion"
+          },
+          "significance": {
+            "type": "string",
+            "title": "Significance"
+          },
+          "action": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Action"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unit"
+          },
+          "severity": {
+            "$ref": "#/components/schemas/Severity",
+            "default": "info"
+          },
+          "evidence_refs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Evidence Refs"
+          },
+          "evidence_pointers": {
+            "items": {
+              "$ref": "#/components/schemas/EvidencePointer"
+            },
+            "type": "array",
+            "title": "Evidence Pointers"
+          },
+          "formula": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Formula"
+          },
+          "input_labels": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Input Labels"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "type",
+          "title",
+          "conclusion",
+          "significance"
+        ],
+        "title": "Insight"
       },
       "KnowledgeBaseCreate": {
         "properties": {
@@ -3770,281 +3843,6 @@
         ],
         "title": "Metric"
       },
-      "NodeExecutionDetail": {
-        "properties": {
-          "id": {
-            "type": "string",
-            "title": "Id"
-          },
-          "run_id": {
-            "type": "string",
-            "title": "Run Id"
-          },
-          "node_name": {
-            "type": "string",
-            "title": "Node Name"
-          },
-          "occurrence": {
-            "type": "integer",
-            "title": "Occurrence"
-          },
-          "prompt_version": {
-            "$ref": "#/components/schemas/PromptVersion"
-          },
-          "status": {
-            "type": "string",
-            "enum": [
-              "running",
-              "completed",
-              "failed"
-            ],
-            "title": "Status"
-          },
-          "error": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Error"
-          },
-          "started_at": {
-            "type": "string",
-            "title": "Started At"
-          },
-          "finished_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Finished At"
-          },
-          "execution_mode": {
-            "type": "string",
-            "enum": [
-              "model",
-              "deterministic",
-              "unknown"
-            ],
-            "title": "Execution Mode",
-            "default": "unknown"
-          },
-          "prompt_replay_supported": {
-            "type": "boolean",
-            "title": "Prompt Replay Supported",
-            "default": false
-          },
-          "replay_unavailable_reason": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Replay Unavailable Reason"
-          },
-          "input_state": {
-            "additionalProperties": true,
-            "type": "object",
-            "title": "Input State"
-          },
-          "output_state": {
-            "anyOf": [
-              {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Output State"
-          },
-          "state_schema_version": {
-            "type": "integer",
-            "title": "State Schema Version"
-          },
-          "model_parameters": {
-            "additionalProperties": true,
-            "type": "object",
-            "title": "Model Parameters"
-          },
-          "diagnostics": {
-            "additionalProperties": true,
-            "type": "object",
-            "title": "Diagnostics"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "id",
-          "run_id",
-          "node_name",
-          "occurrence",
-          "prompt_version",
-          "status",
-          "started_at",
-          "input_state",
-          "state_schema_version"
-        ],
-        "title": "NodeExecutionDetail"
-      },
-      "NodeExecutionSummary": {
-        "properties": {
-          "id": {
-            "type": "string",
-            "title": "Id"
-          },
-          "run_id": {
-            "type": "string",
-            "title": "Run Id"
-          },
-          "node_name": {
-            "type": "string",
-            "title": "Node Name"
-          },
-          "occurrence": {
-            "type": "integer",
-            "title": "Occurrence"
-          },
-          "prompt_version": {
-            "$ref": "#/components/schemas/PromptVersion"
-          },
-          "status": {
-            "type": "string",
-            "enum": [
-              "running",
-              "completed",
-              "failed"
-            ],
-            "title": "Status"
-          },
-          "error": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Error"
-          },
-          "started_at": {
-            "type": "string",
-            "title": "Started At"
-          },
-          "finished_at": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Finished At"
-          },
-          "execution_mode": {
-            "type": "string",
-            "enum": [
-              "model",
-              "deterministic",
-              "unknown"
-            ],
-            "title": "Execution Mode",
-            "default": "unknown"
-          },
-          "prompt_replay_supported": {
-            "type": "boolean",
-            "title": "Prompt Replay Supported",
-            "default": false
-          },
-          "replay_unavailable_reason": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Replay Unavailable Reason"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "id",
-          "run_id",
-          "node_name",
-          "occurrence",
-          "prompt_version",
-          "status",
-          "started_at"
-        ],
-        "title": "NodeExecutionSummary"
-      },
-      "PromptVersion": {
-        "properties": {
-          "id": {
-            "type": "string",
-            "title": "Id"
-          },
-          "node_name": {
-            "type": "string",
-            "title": "Node Name"
-          },
-          "version": {
-            "type": "string",
-            "title": "Version"
-          },
-          "content": {
-            "type": "string",
-            "title": "Content"
-          },
-          "content_hash": {
-            "type": "string",
-            "title": "Content Hash"
-          },
-          "parent_version_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Parent Version Id"
-          },
-          "created_at": {
-            "type": "string",
-            "title": "Created At"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "id",
-          "node_name",
-          "version",
-          "content",
-          "content_hash",
-          "created_at"
-        ],
-        "title": "PromptVersion"
-      },
       "RelationshipConfirmationRequest": {
         "properties": {
           "relationships": {
@@ -4059,41 +3857,6 @@
         "additionalProperties": false,
         "type": "object",
         "title": "RelationshipConfirmationRequest"
-      },
-      "ReplayNodeRequest": {
-        "properties": {
-          "prompt_content": {
-            "type": "string",
-            "maxLength": 30000,
-            "minLength": 20,
-            "title": "Prompt Content"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "prompt_content"
-        ],
-        "title": "ReplayNodeRequest"
-      },
-      "ReplayNodeResponse": {
-        "properties": {
-          "run_id": {
-            "type": "string",
-            "title": "Run Id"
-          },
-          "status": {
-            "type": "string",
-            "title": "Status"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "run_id",
-          "status"
-        ],
-        "title": "ReplayNodeResponse"
       },
       "ReportDetail": {
         "properties": {
@@ -4752,7 +4515,8 @@
           "needs_review",
           "completed_with_warnings",
           "completed",
-          "failed"
+          "failed",
+          "cancelled"
         ],
         "title": "TaskStatus"
       },
@@ -4950,32 +4714,10 @@
             ],
             "title": "Parent Run Id"
           },
-          "forked_from_node_execution_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Forked From Node Execution Id"
-          },
           "entry_node": {
             "type": "string",
             "title": "Entry Node",
             "default": "classify"
-          },
-          "prompt_version_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Prompt Version Id"
           },
           "result": {
             "anyOf": [

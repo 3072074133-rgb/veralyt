@@ -1,17 +1,16 @@
-from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock
 
 import pytest
 
 from app import workflow as w
-from app.models import AnalysisDraft, AnalysisPlan, AnalysisState, DatasetInfo, PlanStep, ToolExecutionResult
+from app.models import AnalysisDraft, AnalysisPlan, AnalysisState, DatasetInfo, PlanStep, QuerySpec, ToolExecutionResult
 
 
 @pytest.fixture
 def isolated(monkeypatch):
     tracker = Mock()
     tracker.complete.side_effect = lambda output: output
-    monkeypatch.setattr(w, 'begin_node', lambda *args: tracker)
+    monkeypatch.setattr(w, 'start_node', lambda *args: tracker)
     repo = MagicMock()
     repo.assert_run_context_current = Mock()
     monkeypatch.setattr(w, 'repository', repo)
@@ -62,27 +61,60 @@ def test_overdue_draft_uses_latest_success(isolated, monkeypatch):
     assert output['draft_execution_mode'] == 'deterministic'
 
 
+def test_query_limit_is_clamped_by_backend(isolated):
+    state, _ = isolated
+    spec = w._query_spec_from_arguments({
+        'query': {'dataset_id': 'a', 'measures': ['金额'], 'limit': 10**15}
+    }, [DatasetInfo(id='a', file_id='f', table_name='a', display_name='A', row_count=1,
+                    columns=[{'name': '金额', 'display_name': '金额', 'data_type': 'DOUBLE',
+                              'null_count': 0, 'sample_values': [], 'semantic_type': 'amount',
+                              'role': 'measure', 'default_aggregation': 'sum', 'semantic_confidence': 1.0}])])
+    assert isinstance(spec, QuerySpec)
+    assert spec.limit == w.settings.max_query_rows
+
+
+def test_delivery_gate_rejects_raw_only_result(isolated):
+    state, _ = isolated
+    state = state.model_copy(update={
+        'plan': AnalysisPlan(goal='汇总', can_execute=True, steps=[]).model_dump(),
+        'tool_results': [{'status': 'success', 'rows': [{'金额': '10'}], 'evidence_ids': ['e']}],
+        'validation': {'passed': True, 'issues': [], 'checked_evidence_ids': ['e']},
+        'draft': AnalysisDraft(summary='原始金额', metrics=[], findings=[], insights=[]).model_dump(),
+    })
+    gate = w._delivery_gate(state, AnalysisDraft.model_validate(state.draft),
+                            w.ValidationReport.model_validate(state.validation))
+    assert gate.status == 'needs_review'
+    assert not next(item for item in gate.checks if item.code == 'new_information_present').passed
+
+
+def test_derived_metric_produces_auditable_insight():
+    from app.insights import derive_insights
+    result = {'evidence_ids': ['e1'], 'rows': [{'指标': '净利润率', '百分比': '27.00', '公式': '净利润/营业收入*100'}],
+              'arguments': {'strategy': 'derived_metric', 'metric': '净利润率'}}
+    insights = derive_insights(result, 'derived_metric')
+    assert len(insights) == 1
+    assert insights[0].formula == '净利润/营业收入*100'
+    assert insights[0].evidence_pointers[0].source_type == 'cell'
+
+
+def test_hybrid_followup_keeps_execution_when_planner_requests_clarification(isolated, monkeypatch):
+    state, _ = isolated
+    state = state.model_copy(update={
+        'user_question': '继续分析：你有什么建议吗',
+        'previous_result': {'title': '上轮结果', 'summary': '已有分析'},
+        'intent': {'route': 'analysis'},
+    })
+    monkeypatch.setattr(w, 'llm', type('FakeLLM', (), {
+        'structured': staticmethod(lambda *args, **kwargs: w.PlanDecision(action='clarify', clarification='请选择分析维度')),
+    })())
+    output = w.plan_node(state)
+    assert output['plan']['can_execute'] is True
+    assert output['plan']['steps'] == []
+
+
 @pytest.mark.parametrize('mode,route', [('deterministic', 'finish'), ('model', 'rewrite')])
 def test_validation_failure_only_rewrites_model_draft(isolated, mode, route):
     state, _ = isolated
     state.draft_execution_mode = mode
     state.validation = {'passed': False, 'issues': [{'code': 'bad', 'message': 'unsupported', 'severity': 'error'}]}
     assert w.reflect_node(state)['reflection']['route'] == route
-
-
-@pytest.mark.parametrize('route', ['derived_metric', 'explanation'])
-def test_successful_followup_replay_preserves_main_report(isolated, monkeypatch, route):
-    state, repo = isolated
-    state.intent = {'route': route, 'metric': '净利润率'}
-    repo.get_run_by_id.return_value = SimpleNamespace(id='replay', task_id='task', question='metric',
-        forked_from_node_execution_id='source', prompt_version_id='prompt')
-    repo.get_node_execution.return_value = SimpleNamespace(input_state=state.model_dump(),
-        state_schema_version=3, run_id='old', node_name='draft', id='source')
-    repo.prompt_versions_for_run.return_value = {}
-    graph = Mock()
-    graph.invoke.return_value = {'final_status': 'completed', 'draft': AnalysisDraft(summary='answer').model_dump(),
-                                 'intent': state.intent}
-    monkeypatch.setattr(w, 'graph', graph)
-    w.run_replay('replay')
-    assert repo.finish_execution.call_args.kwargs['activate'] is False
-    repo.restore_active_run_after_failure.assert_not_called()

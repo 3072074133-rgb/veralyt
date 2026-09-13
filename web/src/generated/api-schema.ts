@@ -317,57 +317,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/tasks/{task_id}/runs/{run_id}/nodes": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List Run Nodes */
-        get: operations["list_run_nodes_api_v1_tasks__task_id__runs__run_id__nodes_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/tasks/{task_id}/nodes/{execution_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get Node Execution */
-        get: operations["get_node_execution_api_v1_tasks__task_id__nodes__execution_id__get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/tasks/{task_id}/nodes/{execution_id}/replay": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Replay Node */
-        post: operations["replay_node_api_v1_tasks__task_id__nodes__execution_id__replay_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/tasks/{task_id}/runs/{run_id}/activate": {
         parameters: {
             query?: never;
@@ -603,6 +552,9 @@ export interface components {
             suggested_questions?: string[];
             /** Calculation Details */
             calculation_details?: components["schemas"]["CalculationDetail"][];
+            /** Insights */
+            insights?: components["schemas"]["Insight"][];
+            delivery?: components["schemas"]["DeliveryGate"] | null;
             /**
              * Verification Level
              * @default evidence
@@ -1031,6 +983,38 @@ export interface components {
             /** Created At */
             created_at: string;
         };
+        /** DeliveryCheck */
+        DeliveryCheck: {
+            /** Code */
+            code: string;
+            /** Label */
+            label: string;
+            /** Passed */
+            passed: boolean;
+            severity: components["schemas"]["Severity"];
+            /** Message */
+            message: string;
+        };
+        /** DeliveryGate */
+        DeliveryGate: {
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "completed" | "completed_with_warnings" | "needs_clarification" | "needs_review" | "failed" | "cancelled";
+            /** Checks */
+            checks?: components["schemas"]["DeliveryCheck"][];
+            /**
+             * New Information Count
+             * @default 0
+             */
+            new_information_count: number;
+            /**
+             * Unresolved Error Count
+             * @default 0
+             */
+            unresolved_error_count: number;
+        };
         /** EvidencePointer */
         EvidencePointer: {
             /** Evidence Id */
@@ -1043,6 +1027,16 @@ export interface components {
             raw_value: string;
             /** Unit */
             unit?: string | null;
+            /**
+             * Source Type
+             * @default cell
+             * @enum {string}
+             */
+            source_type: "cell" | "derived";
+            /** Formula */
+            formula?: string | null;
+            /** Input Pointers */
+            input_pointers?: components["schemas"]["EvidencePointer"][];
         };
         /** EvidenceRecord */
         EvidenceRecord: {
@@ -1098,6 +1092,38 @@ export interface components {
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /** Insight */
+        Insight: {
+            /** Id */
+            id: string;
+            /**
+             * Type
+             * @enum {string}
+             */
+            type: "ratio" | "change" | "comparison" | "ranking" | "contribution" | "anomaly" | "risk" | "reconciliation";
+            /** Title */
+            title: string;
+            /** Conclusion */
+            conclusion: string;
+            /** Significance */
+            significance: string;
+            /** Action */
+            action?: string | null;
+            /** Value */
+            value?: string | null;
+            /** Unit */
+            unit?: string | null;
+            /** @default info */
+            severity: components["schemas"]["Severity"];
+            /** Evidence Refs */
+            evidence_refs?: string[];
+            /** Evidence Pointers */
+            evidence_pointers?: components["schemas"]["EvidencePointer"][];
+            /** Formula */
+            formula?: string | null;
+            /** Input Labels */
+            input_labels?: string[];
         };
         /** KnowledgeBaseCreate */
         KnowledgeBaseCreate: {
@@ -1361,129 +1387,10 @@ export interface components {
             /** Evidence Pointers */
             evidence_pointers?: components["schemas"]["EvidencePointer"][];
         };
-        /** NodeExecutionDetail */
-        NodeExecutionDetail: {
-            /** Id */
-            id: string;
-            /** Run Id */
-            run_id: string;
-            /** Node Name */
-            node_name: string;
-            /** Occurrence */
-            occurrence: number;
-            prompt_version: components["schemas"]["PromptVersion"];
-            /**
-             * Status
-             * @enum {string}
-             */
-            status: "running" | "completed" | "failed";
-            /** Error */
-            error?: string | null;
-            /** Started At */
-            started_at: string;
-            /** Finished At */
-            finished_at?: string | null;
-            /**
-             * Execution Mode
-             * @default unknown
-             * @enum {string}
-             */
-            execution_mode: "model" | "deterministic" | "unknown";
-            /**
-             * Prompt Replay Supported
-             * @default false
-             */
-            prompt_replay_supported: boolean;
-            /** Replay Unavailable Reason */
-            replay_unavailable_reason?: string | null;
-            /** Input State */
-            input_state: {
-                [key: string]: unknown;
-            };
-            /** Output State */
-            output_state?: {
-                [key: string]: unknown;
-            } | null;
-            /** State Schema Version */
-            state_schema_version: number;
-            /** Model Parameters */
-            model_parameters?: {
-                [key: string]: unknown;
-            };
-            /** Diagnostics */
-            diagnostics?: {
-                [key: string]: unknown;
-            };
-        };
-        /** NodeExecutionSummary */
-        NodeExecutionSummary: {
-            /** Id */
-            id: string;
-            /** Run Id */
-            run_id: string;
-            /** Node Name */
-            node_name: string;
-            /** Occurrence */
-            occurrence: number;
-            prompt_version: components["schemas"]["PromptVersion"];
-            /**
-             * Status
-             * @enum {string}
-             */
-            status: "running" | "completed" | "failed";
-            /** Error */
-            error?: string | null;
-            /** Started At */
-            started_at: string;
-            /** Finished At */
-            finished_at?: string | null;
-            /**
-             * Execution Mode
-             * @default unknown
-             * @enum {string}
-             */
-            execution_mode: "model" | "deterministic" | "unknown";
-            /**
-             * Prompt Replay Supported
-             * @default false
-             */
-            prompt_replay_supported: boolean;
-            /** Replay Unavailable Reason */
-            replay_unavailable_reason?: string | null;
-        };
-        /** PromptVersion */
-        PromptVersion: {
-            /** Id */
-            id: string;
-            /** Node Name */
-            node_name: string;
-            /** Version */
-            version: string;
-            /** Content */
-            content: string;
-            /** Content Hash */
-            content_hash: string;
-            /** Parent Version Id */
-            parent_version_id?: string | null;
-            /** Created At */
-            created_at: string;
-        };
         /** RelationshipConfirmationRequest */
         RelationshipConfirmationRequest: {
             /** Relationships */
             relationships?: components["schemas"]["DatasetRelationship"][];
-        };
-        /** ReplayNodeRequest */
-        ReplayNodeRequest: {
-            /** Prompt Content */
-            prompt_content: string;
-        };
-        /** ReplayNodeResponse */
-        ReplayNodeResponse: {
-            /** Run Id */
-            run_id: string;
-            /** Status */
-            status: string;
         };
         /** ReportDetail */
         ReportDetail: {
@@ -1714,7 +1621,7 @@ export interface components {
          * TaskStatus
          * @enum {string}
          */
-        TaskStatus: "ingesting" | "ready" | "classifying" | "off_topic" | "planning" | "needs_clarification" | "executing" | "validating" | "reflecting" | "needs_review" | "completed_with_warnings" | "completed" | "failed";
+        TaskStatus: "ingesting" | "ready" | "classifying" | "off_topic" | "planning" | "needs_clarification" | "executing" | "validating" | "reflecting" | "needs_review" | "completed_with_warnings" | "completed" | "failed" | "cancelled";
         /** UploadBatchResponse */
         UploadBatchResponse: {
             /**
@@ -1798,15 +1705,11 @@ export interface components {
             status: string;
             /** Parent Run Id */
             parent_run_id?: string | null;
-            /** Forked From Node Execution Id */
-            forked_from_node_execution_id?: string | null;
             /**
              * Entry Node
              * @default classify
              */
             entry_node: string;
-            /** Prompt Version Id */
-            prompt_version_id?: string | null;
             result?: components["schemas"]["AnalysisDraft"] | null;
             /**
              * Is Active
@@ -2635,106 +2538,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RunArtifact"][];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    list_run_nodes_api_v1_tasks__task_id__runs__run_id__nodes_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                task_id: string;
-                run_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["NodeExecutionSummary"][];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_node_execution_api_v1_tasks__task_id__nodes__execution_id__get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                task_id: string;
-                execution_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["NodeExecutionDetail"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    replay_node_api_v1_tasks__task_id__nodes__execution_id__replay_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                task_id: string;
-                execution_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ReplayNodeRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            202: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ReplayNodeResponse"];
                 };
             };
             /** @description Validation Error */

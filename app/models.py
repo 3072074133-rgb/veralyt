@@ -29,6 +29,7 @@ class TaskStatus(StrEnum):
     COMPLETED_WITH_WARNINGS = "completed_with_warnings"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class Severity(StrEnum):
@@ -325,7 +326,14 @@ class IntentDecision(StrictModel):
 
     @property
     def is_analysis(self) -> bool:
-        return self.route != 'conversation'
+        # Backward-compatible name retained for API consumers.  New code
+        # should use ``enters_analysis_flow`` so explanation/clarification
+        # turns are not mistaken for strict report analysis.
+        return self.enters_analysis_flow
+
+    @property
+    def enters_analysis_flow(self) -> bool:
+        return self.route in {'analysis', 'derived_metric'}
 
     @property
     def suggested_response(self) -> str | None:
@@ -394,12 +402,38 @@ class QueryRequest(StrictModel):
     title: str = "查询结果"
 
 
+class QueryDecision(StrictModel):
+    """Small model-facing query contract; backend supplies defaults and safety checks."""
+    dimensions: list[str] = Field(default_factory=list, max_length=3)
+    measures: list[str | QueryMeasure] = Field(default_factory=list, max_length=5)
+    filters: list[QueryFilter] = Field(default_factory=list, max_length=10)
+    order_by: str | None = None
+    descending: bool = True
+    # The model may emit an unreasonable value; the backend clamps it to the
+    # configured query limit after parsing instead of spending a retry on it.
+    limit: int | None = None
+
+
+class PlanDecision(StrictModel):
+    """Minimal planning decision; detailed plan fields are derived by the backend."""
+    action: Literal["analyze", "clarify", "conversation"] = "analyze"
+    goal: str | None = None
+    clarification: str | None = None
+    steps: list[PlanStep] = Field(default_factory=list, max_length=6)
+
+
 class EvidencePointer(StrictModel):
     evidence_id: str
     row_index: int = Field(ge=0)
     field: str
     raw_value: str
     unit: str | None = None
+    # ``cell`` points at an original value; ``derived`` points at a value
+    # calculated from the listed input pointers.  Keeping this metadata in
+    # the result makes derived claims auditable without adding another table.
+    source_type: Literal["cell", "derived"] = "cell"
+    formula: str | None = None
+    input_pointers: list["EvidencePointer"] = Field(default_factory=list)
 
 
 class AnalysisPlan(StrictModel):
@@ -475,6 +509,43 @@ class CalculationDetail(StrictModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class Insight(StrictModel):
+    id: str
+    type: Literal[
+        "ratio", "change", "comparison", "ranking",
+        "contribution", "anomaly", "risk", "reconciliation",
+    ]
+    title: str
+    conclusion: str
+    significance: str
+    action: str | None = None
+    value: str | None = None
+    unit: str | None = None
+    severity: Severity = Severity.INFO
+    evidence_refs: list[str] = Field(default_factory=list)
+    evidence_pointers: list[EvidencePointer] = Field(default_factory=list)
+    formula: str | None = None
+    input_labels: list[str] = Field(default_factory=list)
+
+
+class DeliveryCheck(StrictModel):
+    code: str
+    label: str
+    passed: bool
+    severity: Severity
+    message: str
+
+
+class DeliveryGate(StrictModel):
+    status: Literal[
+        "completed", "completed_with_warnings", "needs_clarification",
+        "needs_review", "failed", "cancelled",
+    ]
+    checks: list[DeliveryCheck] = Field(default_factory=list)
+    new_information_count: int = Field(default=0, ge=0)
+    unresolved_error_count: int = Field(default=0, ge=0)
+
+
 class AnalysisDraft(StrictModel):
     title: str = "数据分析结果"
     summary: str
@@ -487,6 +558,8 @@ class AnalysisDraft(StrictModel):
     warnings: list[str] = Field(default_factory=list)
     suggested_questions: list[str] = Field(default_factory=list)
     calculation_details: list[CalculationDetail] = Field(default_factory=list)
+    insights: list[Insight] = Field(default_factory=list)
+    delivery: DeliveryGate | None = None
     verification_level: Literal["legacy", "evidence", "cell"] = "evidence"
 
 
@@ -721,25 +794,13 @@ class ErrorResponse(StrictModel):
     retryable: bool = False
 
 
-class PromptVersion(StrictModel):
-    id: str
-    node_name: str
-    version: str
-    content: str
-    content_hash: str
-    parent_version_id: str | None = None
-    created_at: str
-
-
 class WorkflowRun(StrictModel):
     id: str
     task_id: str
     question: str
     status: str
     parent_run_id: str | None = None
-    forked_from_node_execution_id: str | None = None
     entry_node: str = "classify"
-    prompt_version_id: str | None = None
     result: AnalysisDraft | None = None
     is_active: bool = False
     data_revision: int = 0
@@ -752,38 +813,6 @@ class WorkflowRun(StrictModel):
     finished_at: str | None = None
 
 
-class NodeExecutionSummary(StrictModel):
-    id: str
-    run_id: str
-    node_name: str
-    occurrence: int
-    prompt_version: PromptVersion
-    status: Literal["running", "completed", "failed"]
-    error: str | None = None
-    started_at: str
-    finished_at: str | None = None
-    execution_mode: Literal['model', 'deterministic', 'unknown'] = 'unknown'
-    prompt_replay_supported: bool = False
-    replay_unavailable_reason: str | None = None
-
-
-class NodeExecutionDetail(NodeExecutionSummary):
-    input_state: dict[str, Any]
-    output_state: dict[str, Any] | None = None
-    state_schema_version: int
-    model_parameters: dict[str, Any] = Field(default_factory=dict)
-    diagnostics: dict[str, Any] = Field(default_factory=dict)
-
-
-class ReplayNodeRequest(StrictModel):
-    prompt_content: str = Field(min_length=20, max_length=30000)
-
-
-class ReplayNodeResponse(StrictModel):
-    run_id: str
-    status: str
-
-
 class AnalysisState(StrictModel):
     schema_version: int = 3
     task_id: str
@@ -791,8 +820,9 @@ class AnalysisState(StrictModel):
     user_question: str
     entry_node: Literal["classify", "plan", "execute", "draft", "reflect"] = "classify"
     is_replay: bool = False
-    prompt_versions: dict[str, str] = Field(default_factory=dict)
     conversation_summary: dict[str, Any] | None = None
+    conversation_messages: list[dict[str, Any]] = Field(default_factory=list)
+    previous_result: dict[str, Any] | None = None
     context_prepared: bool = False
     datasets: list[dict[str, Any]] = Field(default_factory=list)
     confirmed_relationships: list[dict[str, Any]] = Field(default_factory=list)
@@ -809,5 +839,7 @@ class AnalysisState(StrictModel):
     validation: dict[str, Any] | None = None
     reflection: dict[str, Any] | None = None
     revision_round: int = 0
+    last_review_draft_hash: str | None = None
+    last_review_issue_hash: str | None = None
     final_status: str | None = None
     error: str | None = None

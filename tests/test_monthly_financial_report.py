@@ -31,7 +31,7 @@ def test_unchanged_validation_stops_retry(monkeypatch):
     from types import SimpleNamespace
     from app.workflow import reflect_node, route_reflection
     monkeypatch.setattr(repository, 'update_task', lambda *args, **kwargs: None)
-    monkeypatch.setattr('app.workflow.begin_node', lambda *args: SimpleNamespace(
+    monkeypatch.setattr('app.workflow.start_node', lambda *args: SimpleNamespace(
         complete=lambda output: output, fail=lambda error: pytest.fail(str(error))))
     state = AnalysisState(task_id='task', run_id='run', user_question='分析报表', revision_round=1,
         validation={'passed': False, 'issues': [{'code': 'unsupported_cell_value', 'message': '金额无证据',
@@ -84,7 +84,10 @@ def test_financial_workflow_end_to_end(imported_report, monkeypatch):
                           config={'configurable': {'thread_id': run}})
     assert result['final_status'] in {'completed', 'completed_with_warnings'}, result.get('error')
     assert result['validation']['passed'], result['validation']
-    assert result['revision_round'] == 1
+    # Deterministic evidence validation now completes without a routine
+    # reflection round; the reviewer is reserved for explicit compatibility
+    # calls and real repair cases.
+    assert result['revision_round'] == 0
     assert len(result['plan']['steps'][0]['dataset_ids']) == 5
     rows = result['tool_results'][0]['rows']
     def amount(sheet, item, field):
@@ -98,6 +101,9 @@ def test_financial_workflow_end_to_end(imported_report, monkeypatch):
     assert amount('应付账款', '明细汇总', '月初余额') == 80000
     assert all(float(r['金额']) == 0 for r in rows if r['报表'] == '勾稽核对')
     assert any('月末现金' in m['label'] for m in result['draft']['metrics'])
+    assert len(result['draft']['insights']) >= 2
+    assert result['draft']['delivery']['status'] in {'completed', 'completed_with_warnings'}
+    assert all(item['evidence_refs'] and item['evidence_pointers'] for item in result['draft']['insights'] if item.get('value') is not None)
 
 
 def test_false_claim_is_still_rejected(imported_report):

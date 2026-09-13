@@ -103,24 +103,6 @@ test('completed analysis renders interactive charts', async ({ page }, testInfo)
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
 })
 
-test('analysis artifacts expand into readable evidence details', async ({ page }, testInfo) => {
-  const acceptedTask = process.env.ACCEPTED_TASK_ID!
-  await page.goto(`/tasks/${acceptedTask}`)
-  await expect(page.getByText('分析过程', { exact: true })).toBeVisible()
-  const queryArtifact = page.locator('.artifact-item').filter({ hasText: '月度收入汇总' })
-  await queryArtifact.locator('summary').click()
-  await expect(queryArtifact.getByText('SQL', { exact: true })).toBeVisible()
-  await expect(queryArtifact.getByRole('columnheader', { name: '月份' })).toBeVisible()
-  await expect(queryArtifact.getByRole('button', { name: '证据 1' })).toBeVisible()
-  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
-  await page.screenshot({ path: testInfo.outputPath('analysis-artifacts-desktop.png'), fullPage: true })
-
-  await page.setViewportSize({ width: 390, height: 844 })
-  await expect(queryArtifact).toBeVisible()
-  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
-  await page.screenshot({ path: testInfo.outputPath('analysis-artifacts-mobile.png'), fullPage: true })
-})
-
 test('multi-sheet workbook shows imported and skipped sheet counts', async ({ page }, testInfo) => {
   const created = await page.request.post('/api/v1/tasks')
   const uploadTask = (await created.json() as { id: string }).id
@@ -135,19 +117,4 @@ test('multi-sheet workbook shows imported and skipped sheet counts', async ({ pa
   await expect(page.getByText('已就绪', { exact: true })).toBeVisible()
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
   await page.screenshot({ path: testInfo.outputPath('multi-sheet-import.png'), fullPage: true })
-})
-
-test('node replay drawer fits and exposes completed snapshots', async ({ page }, testInfo) => {
-  const replayTask = process.env.REPLAY_TASK_ID!
-  await page.goto(`/tasks/${replayTask}`)
-  await page.getByRole('button', { name: '节点记录' }).click()
-  await expect(page.getByRole('heading', { name: '节点记录' })).toBeVisible()
-  await expect(page.getByRole('button', { name: /草稿生成/ }).first()).toBeVisible()
-  await page.getByRole('button', { name: /草稿生成/ }).first().click()
-  await expect(page.getByText('节点提示词')).toBeVisible()
-  await expect(page.locator('.node-editor textarea')).toBeVisible()
-  await expect(page.locator('.node-editor textarea')).toHaveAttribute('readonly', '')
-  await expect(page.getByRole('button', { name: '保存新版本并重跑' })).toBeDisabled()
-  await expect.poll(() => page.locator('.node-replay-drawer').evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
-  await page.screenshot({ path: testInfo.outputPath('node-replay-drawer.png'), fullPage: true })
 })

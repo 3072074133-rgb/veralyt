@@ -30,7 +30,7 @@ def validate_claim(
     valid_pointers: list[EvidencePointer] = []
     for pointer in pointers:
         evidence = repository.get_evidence(state.task_id, pointer.evidence_id)
-        is_valid = (
+        cell_valid = (
             pointer.evidence_id in evidence_refs
             and pointer.evidence_id in available
             and evidence is not None
@@ -38,6 +38,26 @@ def validate_claim(
             and pointer.field in evidence.rows[pointer.row_index]
             and str(evidence.rows[pointer.row_index][pointer.field]) == pointer.raw_value
         )
+        # Derived claims point to a persisted calculation row.  Their
+        # reliability comes from the input cell pointers and formula, rather
+        # than pretending that the calculated value existed in the source
+        # spreadsheet.
+        if pointer.source_type == "derived":
+            input_valid = bool(pointer.formula and pointer.input_pointers)
+            if input_valid:
+                input_valid = not validate_claim(
+                    state, target, "", evidence_refs,
+                    pointer.input_pointers, require_evidence=True,
+                )
+            is_valid = (
+                pointer.evidence_id in evidence_refs
+                and pointer.evidence_id in available
+                and evidence is not None
+                and 0 <= pointer.row_index < len(evidence.rows)
+                and input_valid
+            )
+        else:
+            is_valid = cell_valid
         if not is_valid:
             issues.append(ValidationIssue(
                 code="invalid_evidence_pointer",
@@ -115,7 +135,7 @@ def numeric_values_match(token: str, claim: Decimal, raw: Decimal, text: str) ->
     if token.startswith("-"):
         return raw < 0
     if raw < 0:
-        return any(word in text for word in ("下降", "减少", "降低", "下滑", "负", "亏损"))
+        return any(word in text for word in ("下降", "减少", "降低", "下滑", "低", "负", "亏损"))
     return True
 
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from contextlib import ExitStack, nullcontext
-from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -141,18 +140,8 @@ def main():
                         w.run_analysis(run)
                 elapsed = (time.perf_counter() - started) * 1000
                 record = repository.get_run_by_id(run)
-                nodes = repository.list_node_executions(task, run)
-                stages = {}
-                max_snapshot = 0
-                for node in nodes:
-                    if node.finished_at:
-                        duration = (datetime.fromisoformat(node.finished_at) - datetime.fromisoformat(node.started_at)).total_seconds() * 1000
-                        stages[node.node_name] = stages.get(node.node_name, 0) + round(duration, 2)
-                    detail = repository.get_node_execution(task, node.id)
-                    max_snapshot = max(max_snapshot, len(json.dumps(detail.input_state)))
                 samples.append({'scenario': scenario, 'condition': condition, 'repetition': repetition + 1,
                     'elapsed_ms': round(elapsed, 2), 'counters': dict(counters), 'status': record.status,
-                    'stage_ms': stages, 'max_snapshot_chars': max_snapshot,
                     'error': record.error})
                 save()
                 print(f'{scenario}/{condition} {repetition + 1}: {elapsed:.1f} ms, {record.status}', flush=True)

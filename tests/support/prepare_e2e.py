@@ -9,7 +9,6 @@ from app.config import settings
 from app.ingestion import ingest_file, task_dir
 from app.models import (
     AnalysisDraft,
-    AnalysisState,
     ChartSeries,
     ChartSpec,
     DatasetInfo,
@@ -18,7 +17,6 @@ from app.models import (
     Metric,
     QueryMeasure,
     QuerySpec,
-    TaskStatus,
     UploadedFile,
 )
 from app.repository import repository
@@ -112,33 +110,6 @@ def main() -> None:
         {"chart": draft.charts[0].model_dump(mode="json")},
         result.evidence_ids,
     )
-    prompt = repository.ensure_prompt_version("draft", "e2e", "这是用于端到端测试的草稿生成提示词，必须返回结构化结果。")
-    state = AnalysisState(
-        task_id=task_id,
-        run_id=run_id,
-        user_question="按月份分析收入趋势",
-        datasets=[dataset.model_dump(mode="json")],
-        tool_results=[result.model_dump(mode="json")],
-        draft=draft.model_dump(mode="json"),
-    )
-    execution_id = repository.start_node_execution(
-        run_id,
-        "draft",
-        state.model_dump(mode="json"),
-        prompt.id,
-        {"model": "e2e-fixture", "temperature": 0},
-        state.schema_version,
-    )
-    repository.finish_node_execution(execution_id, {"draft": draft.model_dump(mode="json")})
-    repository.update_task(
-        task_id,
-        status=TaskStatus.COMPLETED,
-        progress=100,
-        status_message="分析完成",
-        result=draft,
-    )
-    repository.finish_execution(run_id, TaskStatus.COMPLETED.value, result=draft, activate=True)
-
     workbook_path = settings.data_dir / "e2e-multi-sheet.xlsx"
     workbook = Workbook()
     for index in range(18):

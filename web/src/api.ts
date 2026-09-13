@@ -1,4 +1,4 @@
-import type { DatasetAsset, DatasetAssetDetail, DatasetCorrectionRequest, DatasetCorrectionResult, DatasetPreview, DatasetProfile, DatasetRelationship, EvidenceRecord, KnowledgeBaseDetail, KnowledgeBaseSummary, KnowledgeDocumentInput, KnowledgeMatch, NodeExecutionDetail, NodeExecutionSummary, ReportDetail, ReportJob, ReportSummary, RunArtifact, TaskKnowledgeBinding, TaskListResponse, TaskSnapshot, UploadBatchResponse, WorkflowRun } from './types'
+import type { DatasetAsset, DatasetAssetDetail, DatasetCorrectionRequest, DatasetCorrectionResult, DatasetPreview, DatasetProfile, DatasetRelationship, EvidenceRecord, KnowledgeBaseDetail, KnowledgeBaseSummary, KnowledgeDocumentInput, KnowledgeMatch, ReportDetail, ReportJob, ReportSummary, RunArtifact, TaskKnowledgeBinding, TaskListResponse, TaskSnapshot, UploadBatchResponse, WorkflowRun } from './types'
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, options)
@@ -67,9 +67,6 @@ export const api = {
   getEvidence: (taskId: string, evidenceId: string) => request<EvidenceRecord>(`/api/v1/tasks/${taskId}/evidence/${evidenceId}`),
   listRuns: (taskId: string) => request<WorkflowRun[]>(`/api/v1/tasks/${taskId}/runs`),
   listArtifacts: (taskId: string, runId: string) => request<RunArtifact[]>(`/api/v1/tasks/${taskId}/runs/${runId}/artifacts`),
-  listRunNodes: (taskId: string, runId: string) => request<NodeExecutionSummary[]>(`/api/v1/tasks/${taskId}/runs/${runId}/nodes`),
-  getNodeExecution: (taskId: string, executionId: string) => request<NodeExecutionDetail>(`/api/v1/tasks/${taskId}/nodes/${executionId}`),
-  replayNode: (taskId: string, executionId: string, promptContent: string) => request<{run_id: string; status: string}>(`/api/v1/tasks/${taskId}/nodes/${executionId}/replay`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ prompt_content: promptContent }) }),
   activateRun: (taskId: string, runId: string) => request<WorkflowRun>(`/api/v1/tasks/${taskId}/runs/${runId}/activate`, { method: 'POST' }),
   cancelRun: (taskId: string, runId: string) => request<void>(`/api/v1/tasks/${taskId}/runs/${runId}`, { method: 'DELETE' }),
   publishReport: (taskId: string) => request<ReportJob>(`/api/v1/tasks/${taskId}/reports`, { method: 'POST' }),

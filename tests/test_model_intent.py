@@ -50,6 +50,20 @@ def test_conversation_does_not_query(imported_report, monkeypatch):
     assert repository.get_task(task).status_message == '本轮已回复'
 
 
+def test_contextual_followup_is_not_forced_into_clarification(imported_report, monkeypatch):
+    task, datasets = imported_report
+    run = repository.start_execution(task, '现金流健康度')
+    monkeypatch.setattr(llm, 'structured', lambda *a, **k: IntentDecision(
+        route='clarification', reply='请选择一个财务维度'))
+    output = classify_node(AnalysisState(
+        task_id=task, run_id=run, user_question='现金流健康度',
+        datasets=[d.model_dump() for d in datasets],
+        previous_result={'title': '月度财务报表分析', 'summary': '已完成财务分析',
+                         'insights': [{'title': '现金余额变化', 'conclusion': '期末现金增加'}]},
+    ))
+    assert output['intent']['route'] == 'explanation'
+
+
 def test_repair_does_not_echo_large_invalid_output(monkeypatch):
     calls = []
     def chat(**kwargs):

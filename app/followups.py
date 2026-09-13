@@ -47,6 +47,24 @@ def eligible_evidence(state):
 def reuse_explanation(state):
     from .analysis_tools import _persist_result
     evidence = next(eligible_evidence(state), None)
+    if evidence is None and state.previous_result:
+        # Generic analyses do not necessarily have the financial report
+        # columns required by ``eligible_evidence``.  Reuse the exact evidence
+        # IDs carried by the previous result so contextual follow-ups can be
+        # answered without inventing a new query or asking the user to restate
+        # the dataset.
+        evidence_ids = list(state.previous_result.get("summary_evidence_refs") or [])
+        for key in ("metrics", "findings", "insights"):
+            for item in state.previous_result.get(key) or []:
+                if isinstance(item, dict):
+                    evidence_ids.extend(item.get("evidence_refs") or [])
+        revision = repository.get_run_by_id(state.run_id).data_revision
+        allowed = {item["id"] for item in state.datasets}
+        for evidence_id in dict.fromkeys(evidence_ids):
+            candidate = repository.get_evidence(state.task_id, evidence_id)
+            if candidate and candidate.data_revision == revision and candidate.rows and set(candidate.source_dataset_ids) <= allowed:
+                evidence = candidate
+                break
     if evidence is None:
         return None
     return _persist_result(state.task_id, 'query_data', {'strategy': 'explanation',

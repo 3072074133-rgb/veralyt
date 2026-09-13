@@ -258,6 +258,15 @@ MIGRATIONS: tuple[tuple[int, str, str], ...] = (
         ON task_relationships(task_id, status);
         """,
     ),
+    (
+        11,
+        "remove_node_execution_history",
+        """
+        DROP TABLE IF EXISTS node_executions;
+        DROP TABLE IF EXISTS prompt_versions;
+        DROP INDEX IF EXISTS ix_node_executions_run;
+        """,
+    ),
 )
 
 
@@ -288,10 +297,13 @@ def apply_migrations(connection: sqlite3.Connection, db_path: Path) -> None:
             _ensure_column(connection, "evidence", "source_revision_ids_json", "TEXT NOT NULL DEFAULT '[]'")
         if version == 4:
             _ensure_column(connection, "tasks", "archived_at", "TEXT")
-        if version == 6:
-            _ensure_column(connection, "node_executions", "diagnostics_json", "TEXT NOT NULL DEFAULT '{}'")
         if version == 9:
             _ensure_column(connection, "data_assets", "library_visible", "INTEGER NOT NULL DEFAULT 0")
+        if version == 11:
+            columns = {row[1] for row in connection.execute('PRAGMA table_info("execution_runs")')}
+            for column in ("forked_from_node_execution_id", "prompt_version_id"):
+                if column in columns:
+                    connection.execute(f'ALTER TABLE execution_runs DROP COLUMN "{column}"')
         connection.executescript(sql)
         connection.execute(
             "INSERT INTO schema_migrations(version,name,applied_at) VALUES(?,?,?)",

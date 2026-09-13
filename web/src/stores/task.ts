@@ -3,7 +3,7 @@ import { computed, ref, shallowRef } from 'vue'
 import { api } from '../api'
 import type { EvidenceRecord, RunArtifact, TaskEvent, TaskSnapshot, UploadBatchResponse, UploadFailure, WorkflowRun } from '../types'
 
-const terminal = new Set(['ready', 'off_topic', 'needs_clarification', 'needs_review', 'completed_with_warnings', 'completed', 'failed'])
+const terminal = new Set(['ready', 'off_topic', 'needs_clarification', 'needs_review', 'completed_with_warnings', 'completed', 'failed', 'cancelled'])
 const CURRENT_TASK_KEY = 'analyse-agent.current-task-id'
 
 function savedTaskId() {
@@ -148,6 +148,17 @@ export const useTaskStore = defineStore('task', () => {
       throw reason
     }
   }
+  async function stopCurrentRun() {
+    if (!task.value?.pending_run_id) return
+    error.value = ''
+    try {
+      await api.cancelRun(task.value.id, task.value.pending_run_id)
+      await loadTask(task.value.id)
+    } catch (reason) {
+      error.value = reason instanceof Error ? reason.message : '中止失败'
+      throw reason
+    }
+  }
 
   function connectEvents(id: string) {
     closeEvents()
@@ -158,15 +169,12 @@ export const useTaskStore = defineStore('task', () => {
       'task.updated',
       'conversation.compacting',
       'conversation.compaction_failed',
-      'run.replay_queued',
-      'run.replay_started',
-      'run.replay_failed',
       'run.activated',
       'artifact.created',
     ]
     names.forEach((name) => connection.addEventListener(name, handleEvent as EventListener))
     const snapshotEvents = new Set([
-      'run.replay_queued', 'run.replay_started', 'run.replay_failed', 'run.activated',
+      'run.activated',
     ])
 
     function handleEvent(raw: MessageEvent<string>) {
@@ -214,7 +222,7 @@ export const useTaskStore = defineStore('task', () => {
   }
 
   function closeEvents() { source?.close(); source = undefined }
-  return { task, runs, busy, error, evidence, artifactsByRun, uploadFailures, currentTaskId, isRunning, createTask, loadTask, startNewAnalysis, upload, send, openEvidence, artifactsForRun, loadArtifacts, cancelQueuedRun, closeEvents }
+  return { task, runs, busy, error, evidence, artifactsByRun, uploadFailures, currentTaskId, isRunning, createTask, loadTask, startNewAnalysis, upload, send, openEvidence, artifactsForRun, loadArtifacts, cancelQueuedRun, stopCurrentRun, closeEvents }
 })
 
 function isRunArtifact(value: unknown): value is RunArtifact {

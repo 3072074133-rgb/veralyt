@@ -7,7 +7,7 @@ import time
 from .observability import bind_log_context, duration_ms, log_event
 from .exports import export_html
 from .repository import repository
-from .workflow import run_analysis, run_replay
+from .workflow import run_analysis
 
 
 logger = logging.getLogger(__name__)
@@ -33,10 +33,7 @@ class AnalysisWorker:
             recovered_report_jobs=len(pending_jobs),
         )
         for run in pending_runs:
-            if run.forked_from_node_execution_id:
-                await self.enqueue_replay(run.id)
-            else:
-                await self.enqueue_run(run.id)
+            await self.enqueue_run(run.id)
         for job in pending_jobs:
             await self.enqueue_report(job.id)
 
@@ -53,11 +50,6 @@ class AnalysisWorker:
         if self.queue is None:
             raise RuntimeError("分析队列尚未启动")
         await self.queue.put(("analysis", run_id))
-
-    async def enqueue_replay(self, run_id: str) -> None:
-        if self.queue is None:
-            raise RuntimeError("分析队列尚未启动")
-        await self.queue.put(("replay", run_id))
 
     async def enqueue_report(self, job_id: str) -> None:
         if self.queue is None:
@@ -79,10 +71,7 @@ class AnalysisWorker:
                     continue
                 with bind_log_context(task_id=run.task_id, run_id=run.id):
                     log_event(logger, "worker.job.started", kind=kind)
-                    if kind == "replay":
-                        await asyncio.to_thread(run_replay, identifier)
-                    else:
-                        await asyncio.to_thread(run_analysis, identifier)
+                    await asyncio.to_thread(run_analysis, identifier)
                     log_event(
                         logger,
                         "worker.job.completed",

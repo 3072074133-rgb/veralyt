@@ -5,7 +5,7 @@ import logging
 import time
 import uuid
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -84,6 +84,8 @@ if web_dist.exists():
 
     @app.get("/{path:path}", include_in_schema=False)
     async def frontend(path: str) -> FileResponse:
+        if path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="API endpoint not found")
         requested = (web_dist / path).resolve()
         if web_dist.resolve() in requested.parents and requested.is_file():
             return FileResponse(requested)
