@@ -29,8 +29,95 @@ def _small_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "context_output_reserve_tokens", 300)
     monkeypatch.setattr(settings, "context_base_overhead_tokens", 200)
     monkeypatch.setattr(settings, "context_safety_ratio", 0.1)
-    monkeypatch.setattr(settings, "context_recent_messages", 4)
     monkeypatch.setattr(settings, "summary_batch_tokens", 700)
+
+
+def test_summary_overflow_splits_batch_without_skipping_messages(memory_repo, monkeypatch):
+    from app.llm import LLMContextOverflowError
+    _add_dialogue(memory_repo, 4, width=1)
+    messages = repository.get_task(memory_repo).messages
+    covered = []
+    def summarize(prompt, context, model, **options):
+        assert options['max_attempts'] == 3
+        assert options['output_tokens'] >= 2048
+        batch = context['messages_to_merge']
+        if len(batch) > 1:
+            raise LLMContextOverflowError('too large')
+        covered.append(batch[0]['sequence'])
+        return ConversationMemory(task_goal='analysis')
+    monkeypatch.setattr('app.context_manager.llm.structured', summarize)
+    ContextManager().prepare(memory_repo, messages, current_question='continue', fits_context=lambda c: not c.recent_messages)
+    assert covered == [message.sequence for message in messages]
+    assert repository.get_conversation_memory(memory_repo).covered_until_sequence == messages[-1].sequence
+    assert repository.get_task(memory_repo).messages == messages
+
+
+def test_summary_single_message_failure_preserves_checkpoint(memory_repo, monkeypatch):
+    from app.llm import LLMStructuredOutputError
+    _add_dialogue(memory_repo, 1, width=1)
+    messages = repository.get_task(memory_repo).messages
+    def fail(*args, **kwargs):
+        raise LLMStructuredOutputError('done_reason=length')
+    monkeypatch.setattr('app.context_manager.llm.structured', fail)
+    with pytest.raises(LLMStructuredOutputError, match='最小消息批次'):
+        ContextManager().prepare(memory_repo, messages, current_question='continue', fits_context=lambda c: False)
+    assert repository.get_conversation_memory(memory_repo) is None
+    assert repository.get_task(memory_repo).messages == messages
+
+
+@pytest.mark.parametrize('value,valid', [('6800', True), ('几千', False)])
+def test_exact_fact_checks_source_and_survives_later_summary(memory_repo, monkeypatch, value, valid):
+    from app.models import ExactMemoryFact
+    repository.add_message(memory_repo, 'user', '客户A欠款6800元')
+    messages = repository.get_task(memory_repo).messages
+    fact = ExactMemoryFact(subject='客户A', metric='欠款', value=value, unit='元',
+                           source_sequence=messages[0].sequence, source_quote='客户A欠款6800元')
+    monkeypatch.setattr('app.context_manager.llm.structured',
+                        lambda *args, **kwargs: ConversationMemory(exact_facts=[fact]))
+    manager = ContextManager()
+    if not valid:
+        with pytest.raises(ValueError, match='精确事实来源核对失败'):
+            manager.prepare(memory_repo, messages, current_question='继续', fits_context=lambda c: not c.recent_messages)
+        assert repository.get_conversation_memory(memory_repo) is None
+        return
+    context, _ = manager.prepare(memory_repo, messages, current_question='继续', fits_context=lambda c: not c.recent_messages)
+    assert context.memory.exact_facts[0].value == '6800'
+    repository.add_message(memory_repo, 'user', '继续分析')
+    monkeypatch.setattr('app.context_manager.llm.structured', lambda *args, **kwargs: ConversationMemory())
+    context, _ = manager.prepare(memory_repo, repository.get_task(memory_repo).messages,
+                                  current_question='新问题', fits_context=lambda c: not c.recent_messages)
+    assert context.memory.exact_facts == [fact]
+    assert repository.get_task(memory_repo).messages[0].content == fact.source_quote
+
+
+def test_classifier_compacts_before_request_using_its_own_budget(memory_repo, monkeypatch):
+    from unittest.mock import Mock
+    from app.workflow_nodes import classify
+    from app.models import AnalysisState, IntentDecision
+    from app.llm import _select_context
+    _add_dialogue(memory_repo, 30, width=25)
+    messages = repository.get_task(memory_repo).messages
+    tracker = Mock()
+    tracker.prompt.content = 'Classify the request.'
+    tracker.complete.side_effect = lambda output: output
+    monkeypatch.setattr(classify, 'start_node', lambda *args: tracker)
+    calls = []
+    def model(name, payload, response_model, **kwargs):
+        calls.append(name)
+        if name == 'conversation_summarizer':
+            return ConversationMemory(task_goal='分析报表')
+        _select_context(name, tracker.prompt.content, payload)
+        assert payload['conversation_context']['memory'] is not None
+        return IntentDecision(route='analysis', reply=None)
+    monkeypatch.setattr(classify.llm, 'structured', model)
+    output = classify.classify_node(AnalysisState(
+        task_id=memory_repo, run_id='test', user_question='继续分析',
+        conversation_messages=[item.model_dump(mode='json') for item in messages],
+    ))
+    assert calls[0] == 'conversation_summarizer'
+    assert calls[-1] == 'intent_classifier'
+    assert output['conversation_summary']['memory'] is not None
+    assert len(repository.get_task(memory_repo).messages) == len(messages)
 
 
 def test_short_conversation_does_not_summarize(memory_repo: str, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -64,8 +151,8 @@ def test_long_conversation_compacts_and_preserves_recent_messages(
     _add_dialogue(memory_repo, 30, width=10)
     calls: list[list[dict]] = []
 
-    def summarize(_prompt, payload, _model, *, thinking, max_attempts):
-        assert max_attempts == 1
+    def summarize(_prompt, payload, _model, *, thinking, max_attempts, **kwargs):
+        assert max_attempts == 3
         calls.append(payload["messages_to_merge"])
         previous = payload["previous_memory"] or {}
         return ConversationMemory(
@@ -91,7 +178,7 @@ def test_long_conversation_compacts_and_preserves_recent_messages(
     ]
 
 
-def test_invalid_evidence_keeps_previous_memory_and_analysis_can_continue(
+def test_invalid_summary_evidence_stops_instead_of_dropping_context(
     memory_repo: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -103,21 +190,19 @@ def test_invalid_evidence_keeps_previous_memory_and_analysis_can_continue(
 
     monkeypatch.setattr("app.context_manager.llm.structured", summarize)
     snapshot = repository.get_task(memory_repo)
-    context, budget = ContextManager().prepare(
-        memory_repo,
-        snapshot.messages,
-        current_question="继续分析",
-    )
+    with pytest.raises(ValueError, match="不存在的证据"):
+        ContextManager().prepare(
+            memory_repo,
+            snapshot.messages,
+            current_question="继续分析",
+        )
 
-    assert budget.compacted is False
-    assert context.memory is None
-    assert context.recent_messages
     assert repository.get_conversation_memory(memory_repo) is None
     events = repository.events_after(memory_repo, 0)
     assert any(item.event_type == "conversation.compaction_failed" for item in events)
 
 
-def test_existing_memory_merges_uncovered_messages_with_bounded_requests(
+def test_existing_memory_merges_all_uncovered_messages_needed_to_fit(
     memory_repo: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -147,7 +232,7 @@ def test_existing_memory_merges_uncovered_messages_with_bounded_requests(
     assert context.memory is not None
     assert context.memory.task_goal == "分析报表，统计各部门盈亏"
     assert budget.compacted is True
-    assert 1 <= len(calls) <= 2
+    assert calls
     assert repository.get_conversation_memory(memory_repo).covered_until_sequence > 0
     assert len(context.recent_messages) < len(snapshot.messages)
 
@@ -185,7 +270,7 @@ def test_persisted_cursor_prevents_reprocessing_after_restart(
     calls = 0
 
     batches = []
-    def summarize(_prompt, payload, _model, *, thinking, max_attempts):
+    def summarize(_prompt, payload, _model, *, thinking, max_attempts, **kwargs):
         nonlocal calls
         calls += 1
         batches.append([item['sequence'] for item in payload['messages_to_merge']])
@@ -216,7 +301,8 @@ def test_summary_failure_does_not_advance_existing_cursor(memory_repo, monkeypat
         calls.append(1)
         raise ValueError('invalid summary')
     monkeypatch.setattr('app.context_manager.llm.structured', fail)
-    ContextManager().prepare(memory_repo, repository.get_task(memory_repo).messages, current_question='next')
+    with pytest.raises(ValueError, match='invalid summary'):
+        ContextManager().prepare(memory_repo, repository.get_task(memory_repo).messages, current_question='next')
     current = repository.get_conversation_memory(memory_repo)
-    assert len(calls) == 2
+    assert len(calls) == 1
     assert current == previous

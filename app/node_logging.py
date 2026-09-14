@@ -1,8 +1,7 @@
 """Lightweight workflow node timing logs.
 
-Node inputs, outputs, prompts and model diagnostics are intentionally not
-persisted.  This helper keeps only the short-lived API used by workflow nodes
-and emits aggregate lifecycle events to the application logger.
+Failed structured outputs and their request context are stored as run artifacts.
+Other diagnostics remain transient; lifecycle events go to the application logger.
 """
 from __future__ import annotations
 
@@ -21,7 +20,6 @@ NODE_PROMPTS = {
     "execute": "tool_orchestrator",
     "draft": "draft_writer",
     "reflect": "reflection_reviewer",
-    "respond": "direct_answer",
 }
 
 
@@ -44,10 +42,26 @@ class NodeTracker:
     node_name: str
     prompt: Any | None
     started_at: float
-    execution_mode: str = "deterministic"
+    execution_mode: str = "model"
     diagnostics: dict[str, Any] = field(default_factory=dict)
 
     def record_diagnostics(self, diagnostics: dict[str, Any]) -> None:
+        if diagnostics.get('progress_message'):
+            from .repository import repository
+            message = diagnostics['progress_message']
+            repository.update_task(self.task_id, status_message=message, event_type='report.progress')
+        if "output_attempt" in diagnostics:
+            from .repository import repository
+            repository.add_artifact(
+                self.task_id, self.run_id, "validation", "模型原始输出记录",
+                diagnostics["output_attempt"], status="ready",
+            )
+        if "output_failure" in diagnostics:
+            from .repository import repository
+            repository.add_artifact(
+                self.task_id, self.run_id, "error", "模型输出格式校验记录",
+                diagnostics["output_failure"], status="failed",
+            )
         self.diagnostics.update(diagnostics)
         if diagnostics.get("execution_mode") == "model":
             self.execution_mode = "model"

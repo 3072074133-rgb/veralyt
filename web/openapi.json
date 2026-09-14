@@ -579,18 +579,6 @@
       "get": {
         "summary": "List Datasets",
         "operationId": "list_datasets_api_v1_datasets_get",
-        "parameters": [
-          {
-            "name": "include_archived",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": false,
-              "title": "Include Archived"
-            }
-          }
-        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -598,16 +586,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/DatasetAssetList"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -654,8 +632,8 @@
         }
       },
       "delete": {
-        "summary": "Archive Dataset",
-        "operationId": "archive_dataset_api_v1_datasets__dataset_id__delete",
+        "summary": "Delete Dataset",
+        "operationId": "delete_dataset_api_v1_datasets__dataset_id__delete",
         "parameters": [
           {
             "name": "dataset_id",
@@ -715,346 +693,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/CreateTaskResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/knowledge-bases": {
-      "get": {
-        "summary": "Get Knowledge Bases",
-        "operationId": "get_knowledge_bases_api_v1_knowledge_bases_get",
-        "parameters": [
-          {
-            "name": "include_archived",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": false,
-              "title": "Include Archived"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/KnowledgeBaseList"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "post": {
-        "summary": "Create Private Knowledge Base",
-        "operationId": "create_private_knowledge_base_api_v1_knowledge_bases_post",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/KnowledgeBaseCreate"
-              }
-            }
-          }
-        },
-        "responses": {
-          "201": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/KnowledgeBaseDetail"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/knowledge-bases/{knowledge_base_id}": {
-      "get": {
-        "summary": "Get Private Knowledge Base",
-        "operationId": "get_private_knowledge_base_api_v1_knowledge_bases__knowledge_base_id__get",
-        "parameters": [
-          {
-            "name": "knowledge_base_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Knowledge Base Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/KnowledgeBaseDetail"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "summary": "Delete Knowledge Base",
-        "operationId": "delete_knowledge_base_api_v1_knowledge_bases__knowledge_base_id__delete",
-        "parameters": [
-          {
-            "name": "knowledge_base_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Knowledge Base Id"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Successful Response"
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/knowledge-bases/{knowledge_base_id}/revisions": {
-      "post": {
-        "summary": "Create Knowledge Revision",
-        "operationId": "create_knowledge_revision_api_v1_knowledge_bases__knowledge_base_id__revisions_post",
-        "parameters": [
-          {
-            "name": "knowledge_base_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Knowledge Base Id"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/KnowledgeRevisionCreate"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/KnowledgeBaseDetail"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/tasks/{task_id}/knowledge-bases": {
-      "get": {
-        "summary": "Get Task Knowledge Bases",
-        "operationId": "get_task_knowledge_bases_api_v1_tasks__task_id__knowledge_bases_get",
-        "parameters": [
-          {
-            "name": "task_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Task Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/TaskKnowledgeBinding"
-                  },
-                  "title": "Response Get Task Knowledge Bases Api V1 Tasks  Task Id  Knowledge Bases Get"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "post": {
-        "summary": "Set Task Knowledge Bases",
-        "operationId": "set_task_knowledge_bases_api_v1_tasks__task_id__knowledge_bases_post",
-        "parameters": [
-          {
-            "name": "task_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Task Id"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/KnowledgeBindingRequest"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/TaskKnowledgeBinding"
-                  },
-                  "title": "Response Set Task Knowledge Bases Api V1 Tasks  Task Id  Knowledge Bases Post"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/tasks/{task_id}/runs/{run_id}/knowledge": {
-      "get": {
-        "summary": "Get Run Knowledge",
-        "operationId": "get_run_knowledge_api_v1_tasks__task_id__runs__run_id__knowledge_get",
-        "parameters": [
-          {
-            "name": "task_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Task Id"
-            }
-          },
-          {
-            "name": "run_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Run Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/KnowledgeMatch"
-                  },
-                  "title": "Response Get Run Knowledge Api V1 Tasks  Task Id  Runs  Run Id  Knowledge Get"
                 }
               }
             }
@@ -1550,6 +1188,36 @@
                 }
               }
             }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Delete Saved Report",
+        "operationId": "delete_saved_report_api_v1_reports__report_id__delete",
+        "parameters": [
+          {
+            "name": "report_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Report Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
           },
           "422": {
             "description": "Validation Error",
@@ -2905,6 +2573,20 @@
             "minimum": 0.0,
             "title": "Unresolved Error Count",
             "default": 0
+          },
+          "repair_count": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Repair Count",
+            "default": 0
+          },
+          "issues": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Issues"
           }
         },
         "additionalProperties": false,
@@ -2916,22 +2598,37 @@
       },
       "EvidencePointer": {
         "properties": {
+          "citation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Citation Id"
+          },
           "evidence_id": {
             "type": "string",
-            "title": "Evidence Id"
+            "title": "Evidence Id",
+            "default": ""
           },
           "row_index": {
             "type": "integer",
             "minimum": 0.0,
-            "title": "Row Index"
+            "title": "Row Index",
+            "default": 0
           },
           "field": {
             "type": "string",
-            "title": "Field"
+            "title": "Field",
+            "default": ""
           },
           "raw_value": {
             "type": "string",
-            "title": "Raw Value"
+            "title": "Raw Value",
+            "default": ""
           },
           "unit": {
             "anyOf": [
@@ -2974,12 +2671,6 @@
         },
         "additionalProperties": false,
         "type": "object",
-        "required": [
-          "evidence_id",
-          "row_index",
-          "field",
-          "raw_value"
-        ],
         "title": "EvidencePointer"
       },
       "EvidenceRecord": {
@@ -3246,492 +2937,6 @@
           "significance"
         ],
         "title": "Insight"
-      },
-      "KnowledgeBaseCreate": {
-        "properties": {
-          "name": {
-            "type": "string",
-            "maxLength": 120,
-            "minLength": 1,
-            "title": "Name"
-          },
-          "description": {
-            "type": "string",
-            "maxLength": 500,
-            "title": "Description",
-            "default": ""
-          },
-          "documents": {
-            "items": {
-              "$ref": "#/components/schemas/KnowledgeDocumentInput"
-            },
-            "type": "array",
-            "maxItems": 50,
-            "minItems": 1,
-            "title": "Documents"
-          },
-          "change_summary": {
-            "type": "string",
-            "maxLength": 200,
-            "minLength": 1,
-            "title": "Change Summary",
-            "default": "创建知识库"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "name",
-          "documents"
-        ],
-        "title": "KnowledgeBaseCreate"
-      },
-      "KnowledgeBaseDetail": {
-        "properties": {
-          "id": {
-            "type": "string",
-            "title": "Id"
-          },
-          "name": {
-            "type": "string",
-            "title": "Name"
-          },
-          "description": {
-            "type": "string",
-            "title": "Description",
-            "default": ""
-          },
-          "status": {
-            "type": "string",
-            "enum": [
-              "active",
-              "archived"
-            ],
-            "title": "Status",
-            "default": "active"
-          },
-          "owner_id": {
-            "type": "string",
-            "title": "Owner Id",
-            "default": "local"
-          },
-          "latest_revision": {
-            "type": "integer",
-            "title": "Latest Revision",
-            "default": 1
-          },
-          "document_count": {
-            "type": "integer",
-            "title": "Document Count",
-            "default": 0
-          },
-          "chunk_count": {
-            "type": "integer",
-            "title": "Chunk Count",
-            "default": 0
-          },
-          "created_at": {
-            "type": "string",
-            "title": "Created At"
-          },
-          "updated_at": {
-            "type": "string",
-            "title": "Updated At"
-          },
-          "revisions": {
-            "items": {
-              "$ref": "#/components/schemas/KnowledgeBaseRevision"
-            },
-            "type": "array",
-            "title": "Revisions"
-          },
-          "permission": {
-            "type": "string",
-            "enum": [
-              "owner",
-              "editor",
-              "viewer"
-            ],
-            "title": "Permission",
-            "default": "owner"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "id",
-          "name",
-          "created_at",
-          "updated_at"
-        ],
-        "title": "KnowledgeBaseDetail"
-      },
-      "KnowledgeBaseList": {
-        "properties": {
-          "items": {
-            "items": {
-              "$ref": "#/components/schemas/KnowledgeBaseSummary"
-            },
-            "type": "array",
-            "title": "Items"
-          },
-          "total": {
-            "type": "integer",
-            "title": "Total"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "items",
-          "total"
-        ],
-        "title": "KnowledgeBaseList"
-      },
-      "KnowledgeBaseRevision": {
-        "properties": {
-          "id": {
-            "type": "string",
-            "title": "Id"
-          },
-          "knowledge_base_id": {
-            "type": "string",
-            "title": "Knowledge Base Id"
-          },
-          "revision_number": {
-            "type": "integer",
-            "minimum": 1.0,
-            "title": "Revision Number"
-          },
-          "parent_revision_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Parent Revision Id"
-          },
-          "status": {
-            "type": "string",
-            "enum": [
-              "published",
-              "archived"
-            ],
-            "title": "Status",
-            "default": "published"
-          },
-          "embedding_model": {
-            "type": "string",
-            "title": "Embedding Model"
-          },
-          "embedding_dimensions": {
-            "type": "integer",
-            "exclusiveMinimum": 0.0,
-            "title": "Embedding Dimensions"
-          },
-          "content_hash": {
-            "type": "string",
-            "title": "Content Hash"
-          },
-          "change_summary": {
-            "type": "string",
-            "title": "Change Summary"
-          },
-          "documents": {
-            "items": {
-              "$ref": "#/components/schemas/KnowledgeDocument"
-            },
-            "type": "array",
-            "title": "Documents"
-          },
-          "created_at": {
-            "type": "string",
-            "title": "Created At"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "id",
-          "knowledge_base_id",
-          "revision_number",
-          "embedding_model",
-          "embedding_dimensions",
-          "content_hash",
-          "change_summary",
-          "created_at"
-        ],
-        "title": "KnowledgeBaseRevision"
-      },
-      "KnowledgeBaseSummary": {
-        "properties": {
-          "id": {
-            "type": "string",
-            "title": "Id"
-          },
-          "name": {
-            "type": "string",
-            "title": "Name"
-          },
-          "description": {
-            "type": "string",
-            "title": "Description",
-            "default": ""
-          },
-          "status": {
-            "type": "string",
-            "enum": [
-              "active",
-              "archived"
-            ],
-            "title": "Status",
-            "default": "active"
-          },
-          "owner_id": {
-            "type": "string",
-            "title": "Owner Id",
-            "default": "local"
-          },
-          "latest_revision": {
-            "type": "integer",
-            "title": "Latest Revision",
-            "default": 1
-          },
-          "document_count": {
-            "type": "integer",
-            "title": "Document Count",
-            "default": 0
-          },
-          "chunk_count": {
-            "type": "integer",
-            "title": "Chunk Count",
-            "default": 0
-          },
-          "created_at": {
-            "type": "string",
-            "title": "Created At"
-          },
-          "updated_at": {
-            "type": "string",
-            "title": "Updated At"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "id",
-          "name",
-          "created_at",
-          "updated_at"
-        ],
-        "title": "KnowledgeBaseSummary"
-      },
-      "KnowledgeBindingItem": {
-        "properties": {
-          "knowledge_base_id": {
-            "type": "string",
-            "title": "Knowledge Base Id"
-          },
-          "revision_id": {
-            "type": "string",
-            "title": "Revision Id"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "knowledge_base_id",
-          "revision_id"
-        ],
-        "title": "KnowledgeBindingItem"
-      },
-      "KnowledgeBindingRequest": {
-        "properties": {
-          "bindings": {
-            "items": {
-              "$ref": "#/components/schemas/KnowledgeBindingItem"
-            },
-            "type": "array",
-            "maxItems": 20,
-            "title": "Bindings"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "title": "KnowledgeBindingRequest"
-      },
-      "KnowledgeDocument": {
-        "properties": {
-          "id": {
-            "type": "string",
-            "title": "Id"
-          },
-          "revision_id": {
-            "type": "string",
-            "title": "Revision Id"
-          },
-          "title": {
-            "type": "string",
-            "title": "Title"
-          },
-          "content": {
-            "type": "string",
-            "title": "Content"
-          },
-          "source_name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Source Name"
-          },
-          "chunk_count": {
-            "type": "integer",
-            "title": "Chunk Count",
-            "default": 0
-          },
-          "created_at": {
-            "type": "string",
-            "title": "Created At"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "id",
-          "revision_id",
-          "title",
-          "content",
-          "created_at"
-        ],
-        "title": "KnowledgeDocument"
-      },
-      "KnowledgeDocumentInput": {
-        "properties": {
-          "title": {
-            "type": "string",
-            "maxLength": 160,
-            "minLength": 1,
-            "title": "Title"
-          },
-          "content": {
-            "type": "string",
-            "maxLength": 200000,
-            "minLength": 1,
-            "title": "Content"
-          },
-          "source_name": {
-            "anyOf": [
-              {
-                "type": "string",
-                "maxLength": 260
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Source Name"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "title",
-          "content"
-        ],
-        "title": "KnowledgeDocumentInput"
-      },
-      "KnowledgeMatch": {
-        "properties": {
-          "chunk_id": {
-            "type": "string",
-            "title": "Chunk Id"
-          },
-          "knowledge_base_id": {
-            "type": "string",
-            "title": "Knowledge Base Id"
-          },
-          "knowledge_base_name": {
-            "type": "string",
-            "title": "Knowledge Base Name"
-          },
-          "revision_id": {
-            "type": "string",
-            "title": "Revision Id"
-          },
-          "revision_number": {
-            "type": "integer",
-            "title": "Revision Number"
-          },
-          "document_id": {
-            "type": "string",
-            "title": "Document Id"
-          },
-          "document_title": {
-            "type": "string",
-            "title": "Document Title"
-          },
-          "content": {
-            "type": "string",
-            "title": "Content"
-          },
-          "score": {
-            "type": "number",
-            "title": "Score"
-          },
-          "rank": {
-            "type": "integer",
-            "title": "Rank"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "chunk_id",
-          "knowledge_base_id",
-          "knowledge_base_name",
-          "revision_id",
-          "revision_number",
-          "document_id",
-          "document_title",
-          "content",
-          "score",
-          "rank"
-        ],
-        "title": "KnowledgeMatch"
-      },
-      "KnowledgeRevisionCreate": {
-        "properties": {
-          "documents": {
-            "items": {
-              "$ref": "#/components/schemas/KnowledgeDocumentInput"
-            },
-            "type": "array",
-            "maxItems": 50,
-            "minItems": 1,
-            "title": "Documents"
-          },
-          "change_summary": {
-            "type": "string",
-            "maxLength": 200,
-            "minLength": 1,
-            "title": "Change Summary",
-            "default": "更新知识内容"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "documents"
-        ],
-        "title": "KnowledgeRevisionCreate"
       },
       "MessageRecord": {
         "properties": {
@@ -4233,45 +3438,6 @@
         ],
         "title": "Severity"
       },
-      "TaskKnowledgeBinding": {
-        "properties": {
-          "knowledge_base_id": {
-            "type": "string",
-            "title": "Knowledge Base Id"
-          },
-          "knowledge_base_name": {
-            "type": "string",
-            "title": "Knowledge Base Name"
-          },
-          "revision_id": {
-            "type": "string",
-            "title": "Revision Id"
-          },
-          "revision_number": {
-            "type": "integer",
-            "title": "Revision Number"
-          },
-          "embedding_model": {
-            "type": "string",
-            "title": "Embedding Model"
-          },
-          "bound_at": {
-            "type": "string",
-            "title": "Bound At"
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "knowledge_base_id",
-          "knowledge_base_name",
-          "revision_id",
-          "revision_number",
-          "embedding_model",
-          "bound_at"
-        ],
-        "title": "TaskKnowledgeBinding"
-      },
       "TaskListItem": {
         "properties": {
           "id": {
@@ -4400,13 +3566,6 @@
             },
             "type": "array",
             "title": "Relationships"
-          },
-          "knowledge_bases": {
-            "items": {
-              "$ref": "#/components/schemas/TaskKnowledgeBinding"
-            },
-            "type": "array",
-            "title": "Knowledge Bases"
           },
           "result": {
             "anyOf": [

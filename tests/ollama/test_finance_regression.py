@@ -4,7 +4,7 @@ import pytest
 
 from app.config import settings
 from app.llm import LLMUnavailableError, llm
-from app.models import AnalysisPlan, DatasetQuerySpec, IntentDecision, QueryRequest
+from app.models import DatasetQuerySpec, IntentDecision, PlanDecision, QueryDecision
 
 
 DATASET = {
@@ -56,14 +56,13 @@ def test_local_model_preserves_finance_intent_plan_and_query(record_property) ->
                 "user_question": "按月份汇总收入，并按时间升序展示",
                 "conversation_context": {},
                 "dataset_catalog": [DATASET],
-                "knowledge_context": [],
                 "confirmed_policies": {},
-                "available_tools": ["auto_analyze", "profile_table", "query_data"],
+                "available_tools": ["profile_table", "query_data", "query_financial_report", "query_overdue", "query_department_profit"],
                 "current_plan": None,
                 "completed_step_ids": [],
                 "revision_feedback": None,
             },
-            AnalysisPlan,
+            PlanDecision,
             thinking=True,
         )
         query = llm.structured(
@@ -74,25 +73,19 @@ def test_local_model_preserves_finance_intent_plan_and_query(record_property) ->
                 "current_step": plan.steps[0].model_dump(mode="json"),
                 "selected_dataset": DATASET,
                 "available_results": [],
-                "knowledge_context": [],
                 "latest_validation_failure": None,
             },
-            QueryRequest,
+            QueryDecision,
             thinking=True,
         )
     except LLMUnavailableError as exc:
         pytest.fail(str(exc))
 
-    assert intent.is_analysis is True
-    assert plan.can_execute is True and plan.steps
-    assert query.query == DatasetQuerySpec(
-        dimensions=["月份"],
-        measures=query.query.measures,
-        filters=query.query.filters,
-        order_by=query.query.order_by,
-        descending=query.query.descending,
-        limit=query.query.limit,
-    )
-    assert query.query.dimensions == ["月份"]
-    assert any(item.field == "收入" and item.aggregation == "sum" for item in query.query.measures)
-    assert query.query.descending is False
+    assert intent.route == "analysis"
+    assert plan.action == "analyze" and plan.steps
+    assert query.model_dump(mode="json") == DatasetQuerySpec.model_validate(
+        query.model_dump(mode="json")
+    ).model_dump(mode="json")
+    assert query.dimensions == ["月份"]
+    assert any(item.field == "收入" and item.aggregation == "sum" for item in query.measures)
+    assert query.descending is False

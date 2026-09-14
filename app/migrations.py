@@ -154,79 +154,6 @@ MIGRATIONS: tuple[tuple[int, str, str], ...] = (
         "",
     ),
     (
-        7,
-        "private_vector_knowledge_bases",
-        """
-        CREATE TABLE IF NOT EXISTS knowledge_bases (
-            id TEXT PRIMARY KEY,
-            owner_id TEXT NOT NULL DEFAULT 'local',
-            name TEXT NOT NULL,
-            description TEXT NOT NULL DEFAULT '',
-            status TEXT NOT NULL DEFAULT 'active',
-            latest_revision INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS knowledge_base_revisions (
-            id TEXT PRIMARY KEY,
-            knowledge_base_id TEXT NOT NULL REFERENCES knowledge_bases(id),
-            revision_number INTEGER NOT NULL,
-            parent_revision_id TEXT REFERENCES knowledge_base_revisions(id),
-            status TEXT NOT NULL DEFAULT 'published',
-            embedding_model TEXT NOT NULL,
-            embedding_dimensions INTEGER NOT NULL,
-            content_hash TEXT NOT NULL,
-            change_summary TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            UNIQUE(knowledge_base_id, revision_number)
-        );
-        CREATE TABLE IF NOT EXISTS knowledge_documents (
-            id TEXT PRIMARY KEY,
-            revision_id TEXT NOT NULL REFERENCES knowledge_base_revisions(id) ON DELETE CASCADE,
-            title TEXT NOT NULL,
-            content TEXT NOT NULL,
-            source_name TEXT,
-            created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS knowledge_chunks (
-            id TEXT PRIMARY KEY,
-            revision_id TEXT NOT NULL REFERENCES knowledge_base_revisions(id) ON DELETE CASCADE,
-            document_id TEXT NOT NULL REFERENCES knowledge_documents(id) ON DELETE CASCADE,
-            chunk_index INTEGER NOT NULL,
-            content TEXT NOT NULL,
-            embedding_json TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            UNIQUE(document_id, chunk_index)
-        );
-        CREATE TABLE IF NOT EXISTS task_knowledge_bindings (
-            task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-            knowledge_base_id TEXT NOT NULL REFERENCES knowledge_bases(id),
-            revision_id TEXT NOT NULL REFERENCES knowledge_base_revisions(id),
-            bound_at TEXT NOT NULL,
-            PRIMARY KEY(task_id, knowledge_base_id)
-        );
-        CREATE TABLE IF NOT EXISTS run_knowledge_matches (
-            run_id TEXT NOT NULL REFERENCES execution_runs(id) ON DELETE CASCADE,
-            chunk_id TEXT NOT NULL REFERENCES knowledge_chunks(id),
-            revision_id TEXT NOT NULL REFERENCES knowledge_base_revisions(id),
-            score REAL NOT NULL,
-            rank INTEGER NOT NULL,
-            created_at TEXT NOT NULL,
-            PRIMARY KEY(run_id, chunk_id)
-        );
-        CREATE INDEX IF NOT EXISTS ix_knowledge_bases_updated
-        ON knowledge_bases(updated_at DESC);
-        CREATE INDEX IF NOT EXISTS ix_knowledge_revisions_base
-        ON knowledge_base_revisions(knowledge_base_id, revision_number DESC);
-        CREATE INDEX IF NOT EXISTS ix_knowledge_chunks_revision
-        ON knowledge_chunks(revision_id);
-        CREATE INDEX IF NOT EXISTS ix_task_knowledge_bindings_task
-        ON task_knowledge_bindings(task_id);
-        CREATE INDEX IF NOT EXISTS ix_run_knowledge_matches_run
-        ON run_knowledge_matches(run_id, rank);
-        """,
-    ),
-    (
         8,
         "workbook_level_dataset_assets",
         "",
@@ -265,6 +192,31 @@ MIGRATIONS: tuple[tuple[int, str, str], ...] = (
         DROP TABLE IF EXISTS node_executions;
         DROP TABLE IF EXISTS prompt_versions;
         DROP INDEX IF EXISTS ix_node_executions_run;
+        """,
+    ),
+    (
+        12,
+        "remove_optional_context_library",
+        """
+        DROP TABLE IF EXISTS run_knowledge_matches;
+        DROP TABLE IF EXISTS task_knowledge_bindings;
+        DROP TABLE IF EXISTS knowledge_chunks;
+        DROP TABLE IF EXISTS knowledge_documents;
+        DROP TABLE IF EXISTS knowledge_base_revisions;
+        DROP TABLE IF EXISTS knowledge_bases;
+        DELETE FROM resource_permissions WHERE resource_type='knowledge_base';
+        UPDATE execution_runs
+        SET input_snapshot_json = json_remove(
+            input_snapshot_json,
+            '$.knowledge_base_ids',
+            '$.knowledge_revision_ids',
+            '$.knowledge_revisions'
+        )
+        WHERE json_valid(input_snapshot_json);
+        UPDATE report_versions
+        SET content_json = json_remove(content_json, '$.provenance.knowledge_revision_ids')
+        WHERE json_valid(content_json);
+        DELETE FROM schema_migrations WHERE version=7;
         """,
     ),
 )

@@ -7,8 +7,8 @@ def route_intent(state: AnalysisState) -> str:
     # Only explicit report analysis/calculation enters the strict workflow.
     # Explanations, recommendations, clarifications and ordinary chat end
     # after the intent node with the model's user-facing reply.
-    route = IntentDecision.model_validate(state.intent).route if state.intent else "conversation"
-    return "plan" if route in {"analysis", "derived_metric"} else "off_topic"
+    route = IntentDecision.model_validate(state.intent).route
+    return "plan" if route == "analysis" else "off_topic"
 
 def route_plan(state: AnalysisState) -> str:
     plan = AnalysisPlan.model_validate(state.plan)
@@ -18,27 +18,23 @@ def route_execute(state: AnalysisState) -> str:
     plan = AnalysisPlan.model_validate(state.plan)
     if any(step.id not in state.completed_step_ids for step in plan.steps):
         return "execute"
-    if state.reflection and state.reflection.get("route") == "execute":
-        revision_step_id = f"revision_{state.revision_round}"
-        if revision_step_id not in state.completed_step_ids:
-            return "execute"
     return "draft"
 
 def route_reflection(state: AnalysisState) -> str:
     decision = ReflectionDecision.model_validate(state.reflection)
-    if decision.route == "finish":
+    if state.revision_round > settings.max_revision_rounds:
         return "finish"
-    if decision.verdict == "pass" or state.revision_round >= settings.max_revision_rounds:
-        return "finish"
-    return decision.route if decision.route in {"replan", "execute", "rewrite"} else "rewrite"
+    return decision.route
 
 
 def route_validation(state: AnalysisState) -> str:
-    """Use one repair pass only for model-generated drafts with real errors."""
+    """Send revised drafts back to the model reviewer until accepted or capped."""
     validation = state.validation or {}
-    if validation.get("passed", False):
+    if validation.get("passed", False) and (not state.reflection or state.reflection.get("verdict") == "pass"):
         return "finish"
-    if state.draft_execution_mode == "model" and state.revision_round == 0:
+    if validation.get("passed", False):
+        return "reflect"
+    if state.revision_round < settings.max_revision_rounds:
         return "reflect"
     return "finish"
 

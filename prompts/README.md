@@ -9,11 +9,10 @@ users and financial vocabulary are Chinese.
 | Workflow node | Prompt file | Output contract | Thinking |
 | --- | --- | --- | --- |
 | Intent classification | `intent_classifier.md` | `IntentDecision` | Off |
-| Direct answer | `direct_answer.md` | Plain text | Off |
 | Requirement interpretation and planning | `analysis_planner.md` | `PlanDecision` | On |
 | Query specification | `tool_orchestrator.md` | `QueryDecision` for the planner-selected dataset | On |
 | Draft generation | `draft_writer.md` | `AnalysisDraft` | Off |
-| Reflection review | `reflection_reviewer.md` | `ReflectionDecision` | On |
+| Reflection review | `reflection_reviewer.md` | `ReflectionDecision` | Off |
 | Conversation summarization | `conversation_summarizer.md` | `ConversationMemory` | Off |
 
 Conversation summarization runs before the graph when the context budget is
@@ -24,10 +23,10 @@ The following workflow nodes are deterministic and must not call an LLM:
 
 - start and task creation
 - file validation, parsing, profiling, and DuckDB import
-- deterministic result validation
+- evidence ID, cell pointer, and chart field validation
 - revision routing and retry-budget checks
 - final API response assembly
-- direct answer and end
+- end
 
 ## Runtime assembly
 
@@ -59,8 +58,8 @@ All node implementations must enforce these rules outside the prompt as well:
    assumptions, issues, tool calls, and evidence references only.
 6. Invalid structured output gets one repair attempt. A second failure ends the
    node with a typed error.
-7. The default graph does not run reflection. The legacy reflection entry is
-   retained only so older interrupted runs can be resumed safely.
+7. Structural validation failures are reviewed by the model, which chooses
+   whether to finish, replan, or rewrite within the configured retry budget.
 
 ## Versioning
 

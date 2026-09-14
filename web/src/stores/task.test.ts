@@ -20,6 +20,33 @@ describe('task store', () => {
     expect(store.error).toBe('')
   })
 
+  it('creates a task for a message without files and prevents duplicate submissions', async () => {
+    vi.stubGlobal('EventSource', class { addEventListener() {} close() {} })
+    const create = vi.spyOn(api, 'createTask').mockResolvedValue('text-task')
+    vi.spyOn(api, 'getTask').mockResolvedValue({ id: 'text-task', status: 'ready', files: [] } as unknown as TaskSnapshot)
+    const send = vi.spyOn(api, 'sendMessage').mockResolvedValue({ id: 'text-task', status: 'queued', files: [] } as unknown as TaskSnapshot)
+    vi.spyOn(api, 'listRuns').mockResolvedValue([])
+    const store = useTaskStore()
+
+    const pending = store.send('hello')
+    await store.send('hello')
+    await pending
+
+    expect(create).toHaveBeenCalledTimes(1)
+    expect(send).toHaveBeenCalledExactlyOnceWith('text-task', 'hello')
+    expect(store.currentTaskId).toBe('text-task')
+    expect(store.busy).toBe(false)
+  })
+
+  it('allows retrying after task creation fails', async () => {
+    vi.spyOn(api, 'createTask').mockRejectedValue(new Error('offline'))
+    const store = useTaskStore()
+    await expect(store.send('hello')).rejects.toThrow('offline')
+    expect(store.error).toBe('offline')
+    expect(store.busy).toBe(false)
+    expect(store.task).toBeUndefined()
+  })
+
   it('only clears the current analysis when a new analysis is explicitly started', () => {
     window.localStorage.setItem('analyse-agent.current-task-id', 'task-123')
     setActivePinia(createPinia())
@@ -101,5 +128,12 @@ describe('task store', () => {
     expect(store.artifactsForRun('run-1')).toHaveLength(1)
     expect(store.artifactsForRun('run-1')[0].title).toBe('收入汇总')
     expect(getTask).toHaveBeenCalledTimes(1)
+    getTask.mockResolvedValue({ id: 'task-123', status: 'failed', pending_run_id: null } as unknown as TaskSnapshot)
+    TestEventSource.latest.emit('run.failed', {
+      schema_version: 1, task_id: 'task-123', event_type: 'run.failed',
+      status: 'failed', progress: 100, message: 'failed', payload: {},
+    })
+    await vi.waitFor(() => expect(store.task?.pending_run_id).toBeNull())
+    expect(store.isRunning).toBe(false)
   })
 })

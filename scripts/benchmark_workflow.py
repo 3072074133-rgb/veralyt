@@ -33,7 +33,16 @@ def main():
     from app.config import settings
     from app.financial_reports import query_financial_report
     from app.ingestion import ingest_file
-    from app.models import AnalysisState, ConversationMemory, EvidenceRecord, IntentDecision, UploadedFile
+    from app.models import (
+        AnalysisState,
+        ConversationMemory,
+        EvidenceRecord,
+        GeneratedAnalysisDraft,
+        IntentDecision,
+        PlanDecision,
+        PlanStep,
+        UploadedFile,
+    )
     from app.repository import repository
     repository.initialize()
     samples = []
@@ -117,9 +126,15 @@ def main():
                     if prompt == 'intent_classifier':
                         if scenario == 'conversation':
                             return IntentDecision(route='conversation', reply='你好')
-                        if scenario == 'metric':
-                            return IntentDecision(route='derived_metric', metric='净利润率')
-                        return IntentDecision(route='analysis')
+                        return IntentDecision(route='analysis', reply=None)
+                    if prompt == 'analysis_planner':
+                        catalog = payload['dataset_catalog']
+                        ids = [item['dataset_id'] for item in catalog]
+                        return PlanDecision(action='analyze', goal='基准分析', clarification=None,
+                            clarification_options=[], steps=[PlanStep(id='report', purpose='读取报表项目',
+                                tool='query_financial_report', dataset_id=ids[0], dataset_ids=ids[1:])])
+                    if prompt == 'draft_writer':
+                        return GeneratedAnalysisDraft(summary='基准分析完成')
                     raise AssertionError(f'unexpected model call: {prompt}')
                 started = time.perf_counter()
                 with ExitStack() as stack:
@@ -131,8 +146,8 @@ def main():
                             tool_results=[evidence.model_dump(mode='json')])
                         scope = repository.evidence_scope(task) if hasattr(repository, 'evidence_scope') else nullcontext()
                         with scope:
-                            for limit in (12, 8, 4):
-                                w._draft_context(state, row_limit=limit)
+                            for _ in range(3):
+                                w._draft_context(state)
                     elif scenario == 'snapshots':
                         for _ in range(20):
                             repository.get_task(task)

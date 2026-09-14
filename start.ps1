@@ -24,7 +24,6 @@ function Get-ConfiguredValue {
 }
 $OllamaHost = (Get-ConfiguredValue "ANALYSE_AGENT_OLLAMA_HOST" "http://127.0.0.1:11434").TrimEnd('/')
 $OllamaModel = Get-ConfiguredValue "ANALYSE_AGENT_OLLAMA_MODEL" "qwen3.5:4b"
-$OllamaEmbeddingModel = Get-ConfiguredValue "ANALYSE_AGENT_OLLAMA_EMBEDDING_MODEL" "qwen3-embedding:0.6b"
 $OllamaFlashAttention = Get-ConfiguredValue "OLLAMA_FLASH_ATTENTION" "1"
 $OllamaKvCacheType = Get-ConfiguredValue "OLLAMA_KV_CACHE_TYPE" "q8_0"
 $OllamaNumParallel = Get-ConfiguredValue "OLLAMA_NUM_PARALLEL" "1"
@@ -138,13 +137,6 @@ $hasModel = $ollamaModels.models | Where-Object {
 if (-not $hasModel) {
     throw "The configured model $OllamaModel is missing. Run: ollama pull $OllamaModel"
 }
-$hasEmbeddingModel = $ollamaModels.models | Where-Object {
-    $_.name -eq $OllamaEmbeddingModel -or $_.model -eq $OllamaEmbeddingModel
-}
-if (-not $hasEmbeddingModel) {
-    throw "The configured embedding model $OllamaEmbeddingModel is missing. Run: ollama pull $OllamaEmbeddingModel"
-}
-
 if (-not (Test-Path -LiteralPath $PythonPath)) {
     if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
         throw "The Python environment is missing and uv was not found. Install uv and run this script again."

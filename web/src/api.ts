@@ -1,4 +1,4 @@
-import type { DatasetAsset, DatasetAssetDetail, DatasetCorrectionRequest, DatasetCorrectionResult, DatasetPreview, DatasetProfile, DatasetRelationship, EvidenceRecord, KnowledgeBaseDetail, KnowledgeBaseSummary, KnowledgeDocumentInput, KnowledgeMatch, ReportDetail, ReportJob, ReportSummary, RunArtifact, TaskKnowledgeBinding, TaskListResponse, TaskSnapshot, UploadBatchResponse, WorkflowRun } from './types'
+import type { DatasetAsset, DatasetAssetDetail, DatasetCorrectionRequest, DatasetCorrectionResult, DatasetPreview, DatasetProfile, DatasetRelationship, EvidenceRecord, ReportDetail, ReportJob, ReportSummary, RunArtifact, TaskListResponse, TaskSnapshot, UploadBatchResponse, WorkflowRun } from './types'
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, options)
@@ -21,18 +21,10 @@ export const api = {
   getDatasetPreview: (taskId: string, datasetId: string, page = 1, pageSize = 50) => request<DatasetPreview>(`/api/v1/tasks/${taskId}/datasets/${datasetId}/preview?page=${page}&page_size=${pageSize}`),
   getDatasetProfile: (taskId: string, datasetId: string) => request<DatasetProfile>(`/api/v1/tasks/${taskId}/datasets/${datasetId}/profile`),
   correctDataset: (taskId: string, datasetId: string, payload: DatasetCorrectionRequest) => request<DatasetCorrectionResult>(`/api/v1/tasks/${taskId}/datasets/${datasetId}/corrections`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) }),
-  listDatasets: (includeArchived = false) => request<{items: DatasetAsset[]; total: number}>(`/api/v1/datasets?include_archived=${includeArchived}`),
+  listDatasets: () => request<{items: DatasetAsset[]; total: number}>('/api/v1/datasets'),
   getDataset: (id: string) => request<DatasetAssetDetail>(`/api/v1/datasets/${id}`),
-  archiveDataset: (id: string) => request<void>(`/api/v1/datasets/${id}`, { method: 'DELETE' }),
+  deleteDataset: (id: string) => request<void>(`/api/v1/datasets/${id}`, { method: 'DELETE' }),
   createTaskFromDataset: (datasetId: string, revisionId: string) => request<{id: string; status: string}>(`/api/v1/datasets/${datasetId}/revisions/${revisionId}/tasks`, { method: 'POST' }),
-  listKnowledgeBases: (includeArchived = false) => request<{items: KnowledgeBaseSummary[]; total: number}>(`/api/v1/knowledge-bases?include_archived=${includeArchived}`),
-  getKnowledgeBase: (id: string) => request<KnowledgeBaseDetail>(`/api/v1/knowledge-bases/${id}`),
-  createKnowledgeBase: (payload: {name: string; description: string; documents: KnowledgeDocumentInput[]; change_summary: string}) => request<KnowledgeBaseDetail>('/api/v1/knowledge-bases', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) }),
-  publishKnowledgeRevision: (id: string, payload: {documents: KnowledgeDocumentInput[]; change_summary: string}) => request<KnowledgeBaseDetail>(`/api/v1/knowledge-bases/${id}/revisions`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) }),
-  archiveKnowledgeBase: (id: string) => request<void>(`/api/v1/knowledge-bases/${id}`, { method: 'DELETE' }),
-  getTaskKnowledgeBases: (taskId: string) => request<TaskKnowledgeBinding[]>(`/api/v1/tasks/${taskId}/knowledge-bases`),
-  setTaskKnowledgeBases: (taskId: string, bindings: Array<{knowledge_base_id: string; revision_id: string}>) => request<TaskKnowledgeBinding[]>(`/api/v1/tasks/${taskId}/knowledge-bases`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({bindings}) }),
-  getRunKnowledge: (taskId: string, runId: string) => request<KnowledgeMatch[]>(`/api/v1/tasks/${taskId}/runs/${runId}/knowledge`),
   async uploadFiles(id: string, files: File[]) {
     const form = new FormData()
     files.forEach((file) => form.append('files', file))
@@ -72,5 +64,6 @@ export const api = {
   publishReport: (taskId: string) => request<ReportJob>(`/api/v1/tasks/${taskId}/reports`, { method: 'POST' }),
   getReportJob: (id: string) => request<ReportJob>(`/api/v1/report-jobs/${id}`),
   listReports: () => request<ReportSummary[]>('/api/v1/reports'),
+  deleteReport: (id: string) => request<void>(`/api/v1/reports/${id}`, { method: 'DELETE' }),
   getReport: (id: string) => request<ReportDetail>(`/api/v1/reports/${id}`),
 }

@@ -1,5 +1,44 @@
 import { expect, test } from '@playwright/test'
 
+test('composer stops a running request and preserves the draft', async ({ page }, testInfo) => {
+  const created = await page.request.post('/api/v1/tasks')
+  const { id } = await created.json()
+  const snapshot = await (await page.request.get(`/api/v1/tasks/${id}`)).json()
+  let stopped = false
+  await page.route(`**/api/v1/tasks/${id}`, (route) => route.fulfill({ json: {
+    ...snapshot, status: stopped ? 'cancelled' : 'executing', pending_run_id: stopped ? null : 'test-run',
+  } }))
+  await page.route(`**/api/v1/tasks/${id}/events`, (route) => route.fulfill({ contentType: 'text/event-stream', body: '' }))
+  await page.route(`**/api/v1/tasks/${id}/runs/test-run`, (route) => {
+    expect(route.request().method()).toBe('DELETE')
+    stopped = true
+    return route.fulfill({ status: 204 })
+  })
+  await page.goto(`/tasks/${id}`)
+  await expect(page.locator('.progress-panel')).toHaveCount(0)
+  await page.locator('textarea').fill('下一条问题')
+  await expect(page.getByRole('button', { name: '中止分析', exact: true })).toBeEnabled()
+  await page.screenshot({ path: testInfo.outputPath('composer-stop.png'), fullPage: true })
+  await page.getByRole('button', { name: '中止分析', exact: true }).click()
+  await expect(page.getByRole('button', { name: '发送消息', exact: true })).toBeEnabled()
+  await expect(page.locator('textarea')).toHaveValue('下一条问题')
+  expect(stopped).toBe(true)
+})
+
+test('sends the first message without uploading a file', async ({ page }) => {
+  await page.goto('/')
+  const composer = page.locator('textarea')
+  await composer.fill('你好')
+  await expect(page.locator('.send-button')).toBeEnabled()
+  const submitted = page.waitForResponse((response) => response.url().endsWith('/messages') && response.request().method() === 'POST')
+  await composer.press('Enter')
+  expect((await submitted).ok()).toBe(true)
+  await expect(page).toHaveURL(/\/tasks\/[0-9a-f-]+$/)
+  await expect(page.locator('.user-message')).toHaveText('你好')
+  await expect(composer).toHaveValue('')
+  await expect(page.locator('.empty-state')).toHaveCount(0)
+})
+
 test('workbench and history fit the desktop viewport', async ({ page }, testInfo) => {
   await page.goto('/')
   await expect(page.getByRole('heading', { name: '把表格交给我，直接说你想分析什么' })).toBeVisible()

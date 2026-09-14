@@ -22,6 +22,7 @@ from .models import (
     UploadedFile,
 )
 from .repository import repository
+from .repositories.datasets import DatasetRepository
 from .row_identity import (
     INTERNAL_ROW_ID,
     ensure_internal_row_id,
@@ -29,6 +30,9 @@ from .row_identity import (
     reserve_row_ids,
     table_has_internal_row_id,
 )
+
+
+dataset_repository = DatasetRepository(repository)
 
 
 def preview_dataset(
@@ -41,7 +45,7 @@ def preview_dataset(
     sort_direction: str = "asc",
 ) -> DatasetPreview:
     snapshot = repository.get_task(task_id)
-    dataset = repository.get_task_dataset(task_id, dataset_id)
+    dataset = dataset_repository.get_task_dataset(task_id, dataset_id)
     allowed = {column.name for column in dataset.columns}
     if sort_by and sort_by not in allowed:
         raise ValueError("排序字段不存在")
@@ -81,7 +85,7 @@ def preview_dataset(
 
 def profile_dataset(task_id: str, dataset_id: str) -> DatasetProfile:
     snapshot = repository.get_task(task_id)
-    dataset = repository.get_task_dataset(task_id, dataset_id)
+    dataset = dataset_repository.get_task_dataset(task_id, dataset_id)
     db_path = task_dir(task_id) / "work" / "analysis.duckdb"
     table = f'"{_quote_identifier(dataset.table_name)}"'
     columns: list[DatasetColumnProfile] = []
@@ -124,7 +128,7 @@ def profile_dataset(task_id: str, dataset_id: str) -> DatasetProfile:
 def correct_dataset(
     task_id: str, dataset_id: str, request: DatasetCorrectionRequest
 ) -> DatasetCorrectionResult:
-    current = repository.get_task_dataset(task_id, dataset_id)
+    current = dataset_repository.get_task_dataset(task_id, dataset_id)
     snapshot = repository.get_task(task_id)
     if snapshot.data_revision != request.expected_data_revision:
         raise RuntimeError("数据已被其他操作更新，请刷新预览后重试")
@@ -214,7 +218,7 @@ def correct_dataset(
             "columns": columns,
         })
         content_hash = _file_hash(output_path)
-        data_revision, asset_id, revision_id, revision_number = repository.publish_dataset_correction(
+        data_revision, asset_id, revision_id, revision_number = dataset_repository.publish_dataset_correction(
             task_id, dataset_id, revised, output_path, content_hash,
             request.change_summary, request.expected_data_revision,
         )
@@ -236,11 +240,11 @@ def correct_dataset(
 
 
 def create_task_from_revision(dataset_id: str, revision_id: str) -> str:
-    asset = repository.get_data_asset(dataset_id)
+    asset = dataset_repository.get_data_asset(dataset_id)
     revision = next((item for item in asset.revisions if item.id == revision_id), None)
     if revision is None:
         raise KeyError(revision_id)
-    records = repository.revision_table_records(dataset_id, revision_id)
+    records = dataset_repository.revision_table_records(dataset_id, revision_id)
     if not records:
         raise ValueError("数据版本不包含可分析的数据表")
     task_id = repository.create_task()
@@ -283,7 +287,7 @@ def create_task_from_revision(dataset_id: str, revision_id: str) -> str:
             detected_sheet_count=len(datasets),
             row_count=sum(item.row_count for item in datasets),
         )
-        repository.attach_revision_to_task(
+        dataset_repository.attach_revision_to_task(
             task_id, asset, revision_id, revision.revision_number, file_record, datasets,
             [record["id"] for record in records],
         )

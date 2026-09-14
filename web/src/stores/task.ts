@@ -85,16 +85,18 @@ export const useTaskStore = defineStore('task', () => {
   }
 
   async function send(content: string) {
-    if (!task.value) return
+    if (!content.trim() || busy.value || isRunning.value) return
+    busy.value = true
     error.value = ''
     try {
-      task.value = await api.sendMessage(task.value.id, content)
+      const id = task.value?.id ?? await createTask()
+      task.value = await api.sendMessage(id, content)
       runs.value = await api.listRuns(task.value.id)
       connectEvents(task.value.id)
     } catch (reason) {
       error.value = reason instanceof Error ? reason.message : '发送失败'
       throw reason
-    }
+    } finally { busy.value = false }
   }
 
   async function openEvidence(id: string) {
@@ -168,8 +170,13 @@ export const useTaskStore = defineStore('task', () => {
       'task.created',
       'task.updated',
       'conversation.compacting',
+      'report.progress',
+      'conversation.compacted',
       'conversation.compaction_failed',
       'run.activated',
+      'run.failed',
+      'run.replay_failed',
+      'run.cancelled',
       'artifact.created',
     ]
     names.forEach((name) => connection.addEventListener(name, handleEvent as EventListener))

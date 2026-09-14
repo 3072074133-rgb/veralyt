@@ -16,7 +16,7 @@ from .repository import repository
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt  # noqa: E402
 
-from .chart_builder import normalize_draft_charts, ordered_chart_rows
+from .chart_builder import ordered_chart_rows
 
 REPORT_TEMPLATE = Environment(
     autoescape=select_autoescape(default=True, default_for_string=True),
@@ -135,10 +135,8 @@ def export_html(snapshot: TaskSnapshot) -> Path:
 def _render_charts(snapshot: TaskSnapshot, evidence: list[EvidenceRecord]) -> list[dict[str, str]]:
     if snapshot.result is None:
         return []
-    question = next((m.content for m in reversed(snapshot.messages) if m.role == "user"), "")
-    draft = normalize_draft_charts(snapshot.result, evidence, question)
     rendered: list[dict[str, str]] = []
-    for spec in draft.charts:
+    for spec in snapshot.result.charts:
         image = _render_chart(spec, evidence)
         if image:
             rendered.append({"title": spec.title, "image": image})

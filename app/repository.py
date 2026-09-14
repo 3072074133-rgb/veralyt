@@ -7,7 +7,6 @@ import sqlite3
 import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -161,13 +160,6 @@ class _ClosingConnection(sqlite3.Connection):
 _evidence_cache: ContextVar[tuple[str, str, dict[str, EvidenceRecord | None]] | None] = ContextVar(
     'evidence_cache', default=None
 )
-
-
-@lru_cache(maxsize=128)
-def _cached_relationships(database: str, task_id: str, catalog: tuple[str, ...]) -> tuple[str, ...]:
-    from .dataset_retrieval import detect_dataset_relationships
-    return tuple(DatasetRelationship.model_validate(item).model_dump_json()
-                 for item in detect_dataset_relationships([DatasetInfo.model_validate_json(item) for item in catalog]))
 
 
 class Repository(ReportRepositoryMixin):
@@ -441,8 +433,15 @@ class Repository(ReportRepositoryMixin):
                 (task_id,),
             ).fetchone():
                 raise RuntimeError("该任务已有分析正在运行")
-            if not connection.execute("SELECT 1 FROM datasets WHERE task_id=? LIMIT 1", (task_id,)).fetchone():
-                raise ValueError("请先上传可分析的 Excel 或 CSV 文件")
+            parent_run_id = None
+            if task["status"] == TaskStatus.NEEDS_CLARIFICATION.value:
+                parent = connection.execute(
+                    """SELECT id FROM execution_runs
+                    WHERE task_id=? AND status='needs_clarification' AND data_revision=?
+                    ORDER BY started_at DESC LIMIT 1""",
+                    (task_id, task["data_revision"]),
+                ).fetchone()
+                parent_run_id = parent["id"] if parent else None
             cursor = connection.execute(
                 "INSERT INTO messages VALUES (?, ?, 'user', ?, ?)",
                 (message_id, task_id, content, now),
@@ -453,10 +452,10 @@ class Repository(ReportRepositoryMixin):
                 id,task_id,question,status,error,started_at,finished_at,parent_run_id,
                 entry_node,result_json,is_active,
                 data_revision,message_sequence,claimed_at,heartbeat_at,attempt_count,input_snapshot_json)
-                VALUES (?, ?, ?, 'queued', NULL, ?, NULL, NULL, 'classify', NULL, 0,
+                VALUES (?, ?, ?, 'queued', NULL, ?, NULL, ?, 'classify', NULL, 0,
                 ?, ?, NULL, NULL, 0, ?)""",
                 (
-                    run_id, task_id, content, now, task["data_revision"], message_sequence,
+                    run_id, task_id, content, now, parent_run_id, task["data_revision"], message_sequence,
                     json.dumps(self._task_input_snapshot(connection, task_id), ensure_ascii=False),
                 ),
             )
@@ -611,6 +610,13 @@ class Repository(ReportRepositoryMixin):
                 (now, now, run_id),
             )
         return cursor.rowcount == 1
+
+    def set_execution_entry_node(self, run_id: str, entry_node: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE execution_runs SET entry_node=? WHERE id=?",
+                (entry_node, run_id),
+            )
 
     def requeue_interrupted_executions(self) -> None:
         with self.connect() as connection:
@@ -1109,23 +1115,7 @@ class Repository(ReportRepositoryMixin):
         pending_run_id = pending["id"] if pending else None
         parsed_datasets = [DatasetInfo.model_validate_json(d['catalog_json']) for d in datasets]
         saved_relationships = self.list_task_relationships(task_id)
-        try:
-            detected = [DatasetRelationship.model_validate_json(item) for item in _cached_relationships(
-                str(self.db_path.resolve()), task_id, tuple(d['catalog_json'] for d in datasets)
-            )]
-        except Exception:
-            detected = []
-        saved_by_key = {
-            (item.left_dataset_id, item.left_field, item.right_dataset_id, item.right_field): item
-            for item in saved_relationships
-        }
-        relationships = []
-        seen = set()
-        for item in detected + saved_relationships:
-            key = (item.left_dataset_id, item.left_field, item.right_dataset_id, item.right_field)
-            if key not in seen:
-                relationships.append(saved_by_key.get(key, item))
-                seen.add(key)
+        relationships = saved_relationships
         return TaskSnapshot(
             id=task["id"], title=task["title"], status=TaskStatus(task["status"]),
             progress=task["progress"], status_message=task["status_message"],
@@ -1176,14 +1166,9 @@ class Repository(ReportRepositoryMixin):
         self._task_row(task_id)
         with self.connect() as connection:
             if connection.execute(
-                "SELECT 1 FROM reports WHERE task_id=? AND status='ready'", (task_id,)
+                "SELECT 1 FROM reports WHERE task_id=?", (task_id,)
             ).fetchone():
-                now = utc_now()
-                connection.execute(
-                    "UPDATE tasks SET archived_at=?,updated_at=? WHERE id=?",
-                    (now, now, task_id),
-                )
-                return False
+                raise ValueError('任务仍关联报告，请先在报告库删除相关报告')
             connection.execute("DELETE FROM tasks WHERE id=?", (task_id,))
         return True
 
@@ -1374,10 +1359,8 @@ class Repository(ReportRepositoryMixin):
         )
         return data_revision, current["dataset_id"], revision_id, revision_number
 
-    def list_data_assets(self, include_archived: bool = False) -> DatasetAssetList:
+    def list_data_assets(self) -> DatasetAssetList:
         where = "WHERE library_visible=1"
-        if not include_archived:
-            where += " AND status='active'"
         with self.connect() as connection:
             rows = connection.execute(
                 f"SELECT * FROM data_assets {where} ORDER BY updated_at DESC"
@@ -1481,8 +1464,13 @@ class Repository(ReportRepositoryMixin):
             {"dataset_id": asset.id, "revision_id": revision_id},
         )
 
-    def archive_data_asset(self, dataset_id: str) -> None:
+    def delete_data_asset(self, dataset_id: str) -> None:
+        directory = (settings.data_dir / 'assets' / dataset_id).resolve()
+        root = (settings.data_dir / 'assets').resolve()
+        if directory.parent != root:
+            raise ValueError('无效的数据集路径')
         with self.connect() as connection:
+            connection.execute('BEGIN IMMEDIATE')
             role = connection.execute(
                 """SELECT role FROM resource_permissions
                 WHERE resource_type='dataset' AND resource_id=? AND principal_id='local'""",
@@ -1491,11 +1479,17 @@ class Repository(ReportRepositoryMixin):
             if role is None:
                 raise KeyError(dataset_id)
             if role["role"] != "owner":
-                raise PermissionError("只有所有者可以归档数据集")
+                raise PermissionError("只有所有者可以删除数据集")
+            if connection.execute('SELECT 1 FROM task_dataset_bindings WHERE dataset_id=?', (dataset_id,)).fetchone():
+                raise ValueError('数据集仍被历史任务引用，请先删除相关任务')
             connection.execute(
-                "UPDATE data_assets SET status='archived',updated_at=? WHERE id=?",
-                (utc_now(), dataset_id),
+                'UPDATE dataset_revisions SET parent_revision_id=NULL WHERE dataset_id=?', (dataset_id,),
             )
+            connection.execute('DELETE FROM dataset_revisions WHERE dataset_id=?', (dataset_id,))
+            connection.execute("DELETE FROM resource_permissions WHERE resource_type='dataset' AND resource_id=?", (dataset_id,))
+            connection.execute('DELETE FROM data_assets WHERE id=?', (dataset_id,))
+        if directory.exists():
+            shutil.rmtree(directory)
 
     def add_artifact(
         self,
@@ -1764,81 +1758,6 @@ class Repository(ReportRepositoryMixin):
                 VALUES('dataset',?,'local','owner',?)""",
                 (asset_id, now),
             )
-            self._archive_unbound_single_table_duplicates(connection, identities, asset_id, now)
-
-    @classmethod
-    def _archive_unbound_single_table_duplicates(
-        cls,
-        connection: sqlite3.Connection,
-        identities: set[str],
-        keep_asset_id: str,
-        now: str,
-    ) -> None:
-        candidates = connection.execute(
-            """SELECT a.id,rt.catalog_json,rt.content_hash
-            FROM data_assets a
-            JOIN dataset_revisions r
-              ON r.dataset_id=a.id AND r.revision_number=a.latest_revision
-            JOIN dataset_revision_tables rt ON rt.revision_id=r.id
-            WHERE a.status='active' AND a.id<>?
-              AND (SELECT COUNT(*) FROM dataset_revision_tables x WHERE x.revision_id=r.id)=1
-              AND NOT EXISTS(SELECT 1 FROM task_dataset_bindings b WHERE b.dataset_id=a.id)""",
-            (keep_asset_id,),
-        ).fetchall()
-        duplicate_ids = []
-        for row in candidates:
-            dataset = DatasetInfo.model_validate_json(row["catalog_json"])
-            if cls._dataset_identity(dataset, row["content_hash"]) in identities:
-                duplicate_ids.append(row["id"])
-        if duplicate_ids:
-            placeholders = ",".join("?" for _ in duplicate_ids)
-            connection.execute(
-                f"UPDATE data_assets SET status='archived',updated_at=? WHERE id IN ({placeholders})",
-                (now, *duplicate_ids),
-            )
-
-    @staticmethod
-    def _archive_legacy_orphan_sheet_assets(connection: sqlite3.Connection) -> None:
-        """Hide unbound legacy assets whose names are now represented inside a workbook asset."""
-        workbook_tables = connection.execute(
-            """SELECT rt.catalog_json FROM data_assets a
-            JOIN dataset_revisions r
-              ON r.dataset_id=a.id AND r.revision_number=a.latest_revision
-            JOIN dataset_revision_tables rt ON rt.revision_id=r.id
-            WHERE a.status='active' AND (
-                SELECT COUNT(*) FROM dataset_revision_tables x WHERE x.revision_id=r.id
-            ) > 1"""
-        ).fetchall()
-        names: set[str] = set()
-        for row in workbook_tables:
-            dataset = DatasetInfo.model_validate_json(row["catalog_json"])
-            names.add(dataset.display_name.casefold().strip())
-            if dataset.source_region:
-                names.add(dataset.source_region.sheet_name.casefold().strip())
-        if not names:
-            return
-        candidates = connection.execute(
-            """SELECT a.id,a.name,rt.catalog_json FROM data_assets a
-            JOIN dataset_revisions r
-              ON r.dataset_id=a.id AND r.revision_number=a.latest_revision
-            JOIN dataset_revision_tables rt ON rt.revision_id=r.id
-            WHERE a.status='active'
-              AND (SELECT COUNT(*) FROM dataset_revision_tables x WHERE x.revision_id=r.id)=1
-              AND NOT EXISTS(SELECT 1 FROM task_dataset_bindings b WHERE b.dataset_id=a.id)"""
-        ).fetchall()
-        duplicate_ids = []
-        for row in candidates:
-            dataset = DatasetInfo.model_validate_json(row["catalog_json"])
-            candidate_names = {row["name"].casefold().strip(), dataset.display_name.casefold().strip()}
-            has_broken_name = any("\ufffd" in name for name in candidate_names)
-            if candidate_names & names or has_broken_name:
-                duplicate_ids.append(row["id"])
-        if duplicate_ids:
-            placeholders = ",".join("?" for _ in duplicate_ids)
-            connection.execute(
-                f"UPDATE data_assets SET status='archived',updated_at=? WHERE id IN ({placeholders})",
-                (utc_now(), *duplicate_ids),
-            )
 
     @staticmethod
     def _dataset_identity(dataset: DatasetInfo, content_hash: str) -> str:
@@ -1916,29 +1835,16 @@ class Repository(ReportRepositoryMixin):
             WHERE b.task_id=? ORDER BY b.dataset_id""",
             (task_id,),
         ).fetchall()
-        knowledge_rows = connection.execute(
-            """SELECT b.knowledge_base_id,b.revision_id,r.revision_number,r.content_hash,
-            r.embedding_model FROM task_knowledge_bindings b
-            JOIN knowledge_base_revisions r ON r.id=b.revision_id
-            WHERE b.task_id=? ORDER BY b.knowledge_base_id""",
-            (task_id,),
-        ).fetchall()
         return {
             "dataset_ids": [row["dataset_id"] for row in rows],
             "revision_ids": [row["revision_id"] for row in rows],
             "revisions": [dict(row) for row in rows],
-            "knowledge_base_ids": [row["knowledge_base_id"] for row in knowledge_rows],
-            "knowledge_revision_ids": [row["revision_id"] for row in knowledge_rows],
-            "knowledge_revisions": [dict(row) for row in knowledge_rows],
         }
 
     @staticmethod
     def _input_fingerprint(snapshot: dict[str, Any]) -> str:
         canonical = {
             "revision_ids": sorted(str(value) for value in snapshot.get("revision_ids", [])),
-            "knowledge_revision_ids": sorted(
-                str(value) for value in snapshot.get("knowledge_revision_ids", [])
-            ),
         }
         encoded = json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -1972,15 +1878,9 @@ class Repository(ReportRepositoryMixin):
 
         current_snapshot = cls._task_input_snapshot(connection, task_id)
         if not run_snapshot:
-            if current_snapshot.get("knowledge_revision_ids"):
-                raise ValueError("分析分支缺少知识库版本信息，请基于当前知识库重新分析")
             return
         if cls._input_fingerprint(run_snapshot) == cls._input_fingerprint(current_snapshot):
             return
-        if sorted(run_snapshot.get("knowledge_revision_ids", [])) != sorted(
-            current_snapshot.get("knowledge_revision_ids", [])
-        ):
-            raise ValueError("分析分支基于旧知识库版本，请基于当前知识库重新分析")
         raise ValueError("分析分支的输入数据版本已变化，请重新分析")
 
     @staticmethod

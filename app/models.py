@@ -136,102 +136,6 @@ class DatasetAssetList(StrictModel):
     total: int
 
 
-class KnowledgeDocumentInput(StrictModel):
-    title: str = Field(min_length=1, max_length=160)
-    content: str = Field(min_length=1, max_length=200000)
-    source_name: str | None = Field(default=None, max_length=260)
-
-
-class KnowledgeBaseCreate(StrictModel):
-    name: str = Field(min_length=1, max_length=120)
-    description: str = Field(default="", max_length=500)
-    documents: list[KnowledgeDocumentInput] = Field(min_length=1, max_length=50)
-    change_summary: str = Field(default="创建知识库", min_length=1, max_length=200)
-
-
-class KnowledgeRevisionCreate(StrictModel):
-    documents: list[KnowledgeDocumentInput] = Field(min_length=1, max_length=50)
-    change_summary: str = Field(default="更新知识内容", min_length=1, max_length=200)
-
-
-class KnowledgeDocument(StrictModel):
-    id: str
-    revision_id: str
-    title: str
-    content: str
-    source_name: str | None = None
-    chunk_count: int = 0
-    created_at: str
-
-
-class KnowledgeBaseRevision(StrictModel):
-    id: str
-    knowledge_base_id: str
-    revision_number: int = Field(ge=1)
-    parent_revision_id: str | None = None
-    status: Literal["published", "archived"] = "published"
-    embedding_model: str
-    embedding_dimensions: int = Field(gt=0)
-    content_hash: str
-    change_summary: str
-    documents: list[KnowledgeDocument] = Field(default_factory=list)
-    created_at: str
-
-
-class KnowledgeBaseSummary(StrictModel):
-    id: str
-    name: str
-    description: str = ""
-    status: Literal["active", "archived"] = "active"
-    owner_id: str = "local"
-    latest_revision: int = 1
-    document_count: int = 0
-    chunk_count: int = 0
-    created_at: str
-    updated_at: str
-
-
-class KnowledgeBaseDetail(KnowledgeBaseSummary):
-    revisions: list[KnowledgeBaseRevision] = Field(default_factory=list)
-    permission: Literal["owner", "editor", "viewer"] = "owner"
-
-
-class KnowledgeBaseList(StrictModel):
-    items: list[KnowledgeBaseSummary]
-    total: int
-
-
-class KnowledgeBindingItem(StrictModel):
-    knowledge_base_id: str
-    revision_id: str
-
-
-class KnowledgeBindingRequest(StrictModel):
-    bindings: list[KnowledgeBindingItem] = Field(default_factory=list, max_length=20)
-
-
-class TaskKnowledgeBinding(StrictModel):
-    knowledge_base_id: str
-    knowledge_base_name: str
-    revision_id: str
-    revision_number: int
-    embedding_model: str
-    bound_at: str
-
-
-class KnowledgeMatch(StrictModel):
-    chunk_id: str
-    knowledge_base_id: str
-    knowledge_base_name: str
-    revision_id: str
-    revision_number: int
-    document_id: str
-    document_title: str
-    content: str
-    score: float
-    rank: int
-
-
 class DatasetPreview(StrictModel):
     dataset_id: str
     display_name: str
@@ -299,68 +203,36 @@ class DatasetCorrectionResult(StrictModel):
 
 
 class IntentDecision(StrictModel):
-    route: Literal['analysis', 'derived_metric', 'clarification', 'conversation', 'explanation']
+    route: Literal['analysis', 'clarification', 'conversation', 'explanation']
     reason: str = ''
-    reply: str | None = None
-    metric: str | None = None
-
-    @model_validator(mode='before')
-    @classmethod
-    def read_legacy(cls, value):
-        if not isinstance(value, dict):
-            return value
-        value = dict(value)
-        legacy = value.pop('is_analysis', None)
-        value.pop('confidence', None)
-        if 'suggested_response' in value:
-            value.setdefault('reply', value.pop('suggested_response'))
-        if 'route' not in value and isinstance(legacy, bool):
-            value['route'] = 'analysis' if legacy else 'conversation'
-        if value.get('route') == 'off_topic':
-            value['route'] = 'conversation'
-        if legacy is False and value.get('route') == 'conversation' and not value.get('reply'):
-            value['reply'] = '请告诉我你想了解的问题。'
-        if isinstance(legacy, bool) and legacy != (value.get('route') != 'conversation'):
-            raise ValueError('conflicting legacy intent and route')
-        return value
-
-    @property
-    def is_analysis(self) -> bool:
-        # Backward-compatible name retained for API consumers.  New code
-        # should use ``enters_analysis_flow`` so explanation/clarification
-        # turns are not mistaken for strict report analysis.
-        return self.enters_analysis_flow
-
-    @property
-    def enters_analysis_flow(self) -> bool:
-        return self.route in {'analysis', 'derived_metric'}
-
-    @property
-    def suggested_response(self) -> str | None:
-        return self.reply
+    reply: str | None
 
     @model_validator(mode='after')
     def validate_route_fields(self):
-        if self.route == 'derived_metric' and not self.metric:
-            raise ValueError('derived_metric requires metric')
-        if self.route == 'conversation' and not (self.reply or '').strip():
-            raise ValueError('conversation requires a nonempty reply answering the user')
+        if self.route in {'clarification', 'conversation', 'explanation'} and not (self.reply or '').strip():
+            raise ValueError(f'{self.route} requires a nonempty reply answering the user')
         return self
 
 
 class PlanStep(StrictModel):
     id: str
     purpose: str
-    tool: Literal["auto_analyze", "profile_table", "query_data"]
+    tool: Literal[
+        "profile_table",
+        "query_data",
+        "query_financial_report",
+        "query_overdue",
+        "query_department_profit",
+    ]
     dataset_id: str | None = None
-    dataset_ids: list[str] = Field(default_factory=list, max_length=6)
-    joins: list["QueryJoin"] = Field(default_factory=list, max_length=3)
+    dataset_ids: list[str] = Field(default_factory=list)
+    joins: list["QueryJoin"] = Field(default_factory=list)
 
 
 class QueryMeasure(StrictModel):
     field: str
-    aggregation: Literal["sum", "average", "min", "max", "count"] = "sum"
-    alias: str | None = None
+    aggregation: Literal["sum", "average", "min", "max", "count"]
+    alias: str
 
 
 class QueryFilter(StrictModel):
@@ -373,28 +245,28 @@ class QueryJoin(StrictModel):
     right_dataset_id: str
     left_field: str
     right_field: str
-    join_type: Literal["inner", "left"] = "left"
+    join_type: Literal["inner", "left"]
 
 
 class QuerySpec(StrictModel):
     dataset_id: str
-    dimensions: list[str] = Field(default_factory=list, max_length=3)
-    measures: list[QueryMeasure] = Field(default_factory=list, min_length=1, max_length=5)
-    filters: list[QueryFilter] = Field(default_factory=list, max_length=10)
+    dimensions: list[str] = Field(default_factory=list)
+    measures: list[QueryMeasure] = Field(default_factory=list)
+    filters: list[QueryFilter] = Field(default_factory=list)
     order_by: str | None = None
     descending: bool = True
-    limit: int = Field(default=100, ge=1, le=5000)
-    joins: list[QueryJoin] = Field(default_factory=list, max_length=3)
+    limit: int = Field(default=100, ge=1)
+    joins: list[QueryJoin] = Field(default_factory=list)
 
 
 class DatasetQuerySpec(StrictModel):
-    dimensions: list[str] = Field(default_factory=list, max_length=3)
-    measures: list[QueryMeasure] = Field(default_factory=list, min_length=1, max_length=5)
-    filters: list[QueryFilter] = Field(default_factory=list, max_length=10)
+    dimensions: list[str] = Field(default_factory=list)
+    measures: list[QueryMeasure] = Field(default_factory=list)
+    filters: list[QueryFilter] = Field(default_factory=list)
     order_by: str | None = None
     descending: bool = True
-    limit: int = Field(default=100, ge=1, le=5000)
-    joins: list[QueryJoin] = Field(default_factory=list, max_length=3)
+    limit: int = Field(default=100, ge=1)
+    joins: list[QueryJoin] = Field(default_factory=list)
 
 
 class QueryRequest(StrictModel):
@@ -403,30 +275,37 @@ class QueryRequest(StrictModel):
 
 
 class QueryDecision(StrictModel):
-    """Small model-facing query contract; backend supplies defaults and safety checks."""
-    dimensions: list[str] = Field(default_factory=list, max_length=3)
-    measures: list[str | QueryMeasure] = Field(default_factory=list, max_length=5)
-    filters: list[QueryFilter] = Field(default_factory=list, max_length=10)
-    order_by: str | None = None
-    descending: bool = True
-    # The model may emit an unreasonable value; the backend clamps it to the
-    # configured query limit after parsing instead of spending a retry on it.
-    limit: int | None = None
+    """Model-selected structured query for the planner-selected dataset."""
+    dimensions: list[str]
+    measures: list[QueryMeasure]
+    filters: list[QueryFilter]
+    order_by: str | None
+    descending: bool
+    limit: int = Field(ge=1)
+    joins: list[QueryJoin]
 
 
 class PlanDecision(StrictModel):
-    """Minimal planning decision; detailed plan fields are derived by the backend."""
-    action: Literal["analyze", "clarify", "conversation"] = "analyze"
-    goal: str | None = None
-    clarification: str | None = None
-    steps: list[PlanStep] = Field(default_factory=list, max_length=6)
+    """Minimal planning decision returned by the analysis planner."""
+    action: Literal["analyze", "clarify"]
+    goal: str = Field(min_length=1)
+    clarification: str | None
+    clarification_options: list[str]
+    steps: list[PlanStep]
+
+    @model_validator(mode="after")
+    def validate_clarification(self):
+        if self.action == "clarify" and not (self.clarification or "").strip():
+            raise ValueError("clarify requires a nonempty clarification")
+        return self
 
 
 class EvidencePointer(StrictModel):
-    evidence_id: str
-    row_index: int = Field(ge=0)
-    field: str
-    raw_value: str
+    citation_id: str | None = None
+    evidence_id: str = ""
+    row_index: int = Field(default=0, ge=0)
+    field: str = ""
+    raw_value: str = ""
     unit: str | None = None
     # ``cell`` points at an original value; ``derived`` points at a value
     # calculated from the listed input pointers.  Keeping this metadata in
@@ -446,6 +325,7 @@ class AnalysisPlan(StrictModel):
     assumptions: list[str] = Field(default_factory=list)
     steps: list[PlanStep] = Field(default_factory=list)
     clarification_question: str | None = None
+    clarification_options: list[str] = Field(default_factory=list)
 
 
 class ToolExecutionResult(StrictModel):
@@ -544,6 +424,8 @@ class DeliveryGate(StrictModel):
     checks: list[DeliveryCheck] = Field(default_factory=list)
     new_information_count: int = Field(default=0, ge=0)
     unresolved_error_count: int = Field(default=0, ge=0)
+    repair_count: int = Field(default=0, ge=0)
+    issues: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class AnalysisDraft(StrictModel):
@@ -564,14 +446,7 @@ class AnalysisDraft(StrictModel):
 
 
 class GeneratedAnalysisDraft(AnalysisDraft):
-    """Bound model output size without invalidating larger historical reports."""
-
-    metrics: list[Metric] = Field(default_factory=list, max_length=8)
-    findings: list[Finding] = Field(default_factory=list, max_length=8)
-    charts: list[ChartSpec] = Field(default_factory=list, max_length=4)
-    assumptions: list[str] = Field(default_factory=list, max_length=10)
-    warnings: list[str] = Field(default_factory=list, max_length=10)
-    suggested_questions: list[str] = Field(default_factory=list, max_length=5)
+    """Draft returned directly by the writing model."""
 
 
 class ValidationIssue(StrictModel):
@@ -596,9 +471,15 @@ class ReviewIssue(StrictModel):
 
 class ReflectionDecision(StrictModel):
     verdict: Literal["pass", "revise"]
-    route: Literal["finish", "replan", "execute", "rewrite"]
+    route: Literal["finish", "replan", "rewrite"]
     reason: str
     issues: list[ReviewIssue] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_route(self):
+        if self.verdict == "pass" and self.route != "finish":
+            raise ValueError("pass requires finish")
+        return self
 
 
 class EvidenceRecord(StrictModel):
@@ -632,8 +513,19 @@ class AnalysisMemory(StrictModel):
     limitations: list[str] = Field(default_factory=list)
 
 
+class ExactMemoryFact(StrictModel):
+    subject: str
+    metric: str
+    value: str
+    unit: str
+    period: str = ""
+    source_sequence: int
+    source_quote: str
+
+
 class ConversationMemory(StrictModel):
     task_goal: str = ""
+    exact_facts: list[ExactMemoryFact] = Field(default_factory=list)
     confirmed_requirements: list[str] = Field(default_factory=list)
     analysis_scope: list[str] = Field(default_factory=list)
     metric_definitions: list[str] = Field(default_factory=list)
@@ -669,7 +561,6 @@ class TaskSnapshot(StrictModel):
     messages: list[MessageRecord] = Field(default_factory=list)
     datasets: list[DatasetInfo] = Field(default_factory=list)
     relationships: list[DatasetRelationship] = Field(default_factory=list)
-    knowledge_bases: list[TaskKnowledgeBinding] = Field(default_factory=list)
     result: AnalysisDraft | None = None
     clarification_question: str | None = None
     error: str | None = None
@@ -818,6 +709,11 @@ class AnalysisState(StrictModel):
     task_id: str
     run_id: str
     user_question: str
+    # The first request that entered the analysis workflow remains stable
+    # across clarification turns. The user's latest answer is passed
+    # separately so downstream nodes do not classify it as a new request.
+    analysis_question: str | None = None
+    clarification_answer: str | None = None
     entry_node: Literal["classify", "plan", "execute", "draft", "reflect"] = "classify"
     is_replay: bool = False
     conversation_summary: dict[str, Any] | None = None
@@ -826,20 +722,16 @@ class AnalysisState(StrictModel):
     context_prepared: bool = False
     datasets: list[dict[str, Any]] = Field(default_factory=list)
     confirmed_relationships: list[dict[str, Any]] = Field(default_factory=list)
-    knowledge_context: list[dict[str, Any]] = Field(default_factory=list)
     dataset_candidates: list[dict[str, Any]] = Field(default_factory=list)
     intent: dict[str, Any] | None = None
     plan: dict[str, Any] | None = None
     tool_results: list[dict[str, Any]] = Field(default_factory=list)
     completed_step_ids: list[str] = Field(default_factory=list)
     tool_call_count: int = 0
-    step_attempts: dict[str, int] = Field(default_factory=dict)
+    query_failures: list[dict[str, Any]] = Field(default_factory=list)
     draft: dict[str, Any] | None = None
-    draft_execution_mode: Literal["model", "deterministic", "unknown"] = "unknown"
     validation: dict[str, Any] | None = None
     reflection: dict[str, Any] | None = None
     revision_round: int = 0
-    last_review_draft_hash: str | None = None
-    last_review_issue_hash: str | None = None
     final_status: str | None = None
     error: str | None = None

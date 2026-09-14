@@ -28,10 +28,18 @@ def test_create_and_list_task(client: TestClient) -> None:
     assert listing.json()["total"] == 0
 
 
-def test_message_requires_dataset(client: TestClient) -> None:
+def test_message_is_queued_for_model_without_dataset(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def enqueue_run(_run_id: str) -> None:
+        return None
+
+    monkeypatch.setattr("app.api.worker.enqueue_run", enqueue_run)
     task_id = client.post("/api/v1/tasks").json()["id"]
     response = client.post(f"/api/v1/tasks/{task_id}/messages", json={"content": "分析收入"})
-    assert response.status_code == 400
+    assert response.status_code == 202
+    assert response.json()["status"] == "classifying"
 
 
 def test_unsupported_upload_preserves_ready_state(client: TestClient) -> None:

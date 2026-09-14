@@ -75,7 +75,7 @@ def duration_ms(started_at: float) -> int:
 def _safe_fields(fields: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in fields.items():
-        if key in {"prompt", "content", "rows", "knowledge", "question"}:
+        if key in {"prompt", "content", "rows", "question"}:
             continue
         if isinstance(value, str):
             result[key] = value[:500]

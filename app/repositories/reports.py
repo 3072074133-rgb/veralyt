@@ -11,6 +11,19 @@ from ..models import ReportDetail, ReportJob, ReportSummary, TaskStatus, utc_now
 
 
 class ReportRepositoryMixin:
+    def delete_report(self, report_id: str) -> None:
+        directory = (settings.data_dir / 'reports' / report_id).resolve()
+        if directory.parent != (settings.data_dir / 'reports').resolve():
+            raise ValueError('无效的报告路径')
+        with self.connect() as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            if connection.execute('SELECT 1 FROM reports WHERE id=?', (report_id,)).fetchone() is None:
+                raise KeyError(report_id)
+            connection.execute('DELETE FROM report_jobs WHERE report_id=?', (report_id,))
+            connection.execute('DELETE FROM reports WHERE id=?', (report_id,))
+        if directory.exists():
+            shutil.rmtree(directory)
+
     def publish_report(self, task_id: str, run_id: str, html_path: Path | None = None) -> ReportDetail:
         now = utc_now()
         with self.connect() as connection:
@@ -40,7 +53,6 @@ class ReportRepositoryMixin:
                 )
             snapshot = json.loads(run["input_snapshot_json"] or "{}")
             source_revision_ids = list(snapshot.get("revision_ids", []))
-            knowledge_revision_ids = list(snapshot.get("knowledge_revision_ids", []))
             content = {
                 "analysis": json.loads(run["result_json"]),
                 "provenance": {
@@ -48,7 +60,6 @@ class ReportRepositoryMixin:
                     "run_id": run_id,
                     "data_revision": run["data_revision"],
                     "source_revision_ids": source_revision_ids,
-                    "knowledge_revision_ids": knowledge_revision_ids,
                     "published_at": now,
                 },
             }

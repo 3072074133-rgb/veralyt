@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { Archive, ChevronDown, ChevronRight, Database, Play, RefreshCw, Upload } from 'lucide-vue-next'
+import { Trash2, ChevronDown, ChevronRight, Database, Play, RefreshCw, Upload } from 'lucide-vue-next'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import 'element-plus/es/components/message/style/css'
+import 'element-plus/es/components/message-box/style/css'
 import { useRouter } from 'vue-router'
 import { api } from '../api'
 import type { DatasetAsset, DatasetAssetDetail } from '../types'
@@ -28,13 +30,13 @@ async function toggle(item: DatasetAsset) {
     catch (reason) { ElMessage.error(reason instanceof Error ? reason.message : '版本记录加载失败') }
   }
 }
-async function archive(item: DatasetAsset) {
+async function remove(item: DatasetAsset) {
   try {
-    await ElMessageBox.confirm(`归档“${item.name}”？已被任务引用的版本仍会保留。`, '归档数据集', {type: 'warning', confirmButtonText: '归档', cancelButtonText: '取消'})
-    await api.archiveDataset(item.id)
+    await ElMessageBox.confirm(`永久删除“${item.name}”及所有版本？此操作不可恢复。`, '删除数据集', {type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消'})
+    await api.deleteDataset(item.id)
     await load()
   } catch (reason) {
-    if (reason !== 'cancel' && reason !== 'close') ElMessage.error(reason instanceof Error ? reason.message : '归档失败')
+    if (reason !== 'cancel' && reason !== 'close') ElMessage.error(reason instanceof Error ? reason.message : '删除失败')
   }
 }
 function formatTime(value: string) { return new Date(value).toLocaleString('zh-CN', {hour12: false}) }
@@ -75,7 +77,7 @@ async function uploadDatasets(event: Event) {
       <div v-if="items.length" class="asset-table">
         <div class="asset-row asset-head"><span>名称</span><span>当前版本</span><span>所有者</span><span>更新时间</span><span></span></div>
         <template v-for="item in items" :key="item.id">
-          <div class="asset-row"><button class="asset-name" @click="toggle(item)"><component :is="expanded === item.id ? ChevronDown : ChevronRight" :size="16" /><Database :size="16" /><span><strong>{{ item.name }}</strong><small>{{ item.description || '本地数据集' }}</small></span></button><strong>v{{ item.latest_revision }}</strong><span>{{ item.owner_id === 'local' ? '本地工作区' : item.owner_id }}</span><span>{{ formatTime(item.updated_at) }}</span><button class="icon-button" title="归档" @click="archive(item)"><Archive :size="16" /></button></div>
+          <div class="asset-row"><button class="asset-name" @click="toggle(item)"><component :is="expanded === item.id ? ChevronDown : ChevronRight" :size="16" /><Database :size="16" /><span><strong>{{ item.name }}</strong><small>{{ item.description || '本地数据集' }}</small></span></button><strong>v{{ item.latest_revision }}</strong><span>{{ item.owner_id === 'local' ? '本地工作区' : item.owner_id }}</span><span>{{ formatTime(item.updated_at) }}</span><button class="icon-button" title="删除" @click="remove(item)"><Trash2 :size="16" /></button></div>
           <div v-if="expanded === item.id" class="revision-list"><div v-for="revision in detail[item.id]?.revisions" :key="revision.id" class="revision-row"><strong>v{{ revision.revision_number }}</strong><span>{{ revision.change_summary }}</span><span>{{ revision.tables.reduce((sum, table) => sum + table.row_count, 0).toLocaleString() }} 行</span><code>{{ revision.content_hash.slice(0, 12) }}</code><span>{{ formatTime(revision.created_at) }}</span><button class="button" @click="analyze(item.id, revision.id)"><Play :size="14" />分析</button></div></div>
         </template>
       </div>

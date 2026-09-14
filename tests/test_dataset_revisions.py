@@ -329,10 +329,13 @@ def test_artifacts_and_persisted_report(tmp_path: Path) -> None:
             assert report["versions"][0]["content"]["provenance"]["run_id"] == run_id
             assert Path(report["versions"][0]["html_path"]).is_file()
             assert client.get("/api/v1/reports").json()[0]["id"] == report["id"]
-            assert client.delete(f"/api/v1/tasks/{task_id}").status_code == 204
+            assert client.delete(f"/api/v1/tasks/{task_id}").status_code == 409
             assert client.get(f"/api/v1/tasks/{task_id}").status_code == 200
-            assert all(item["id"] != task_id for item in client.get("/api/v1/tasks").json()["items"])
-            assert client.get(f"/api/v1/reports/{report['id']}").status_code == 200
+            assert client.delete(f"/api/v1/reports/{report['id']}").status_code == 204
+            assert client.get(f"/api/v1/reports/{report['id']}").status_code == 404
+            assert not Path(report["versions"][0]["html_path"]).exists()
+            assert client.delete(f"/api/v1/tasks/{task_id}").status_code == 204
+            assert client.get(f"/api/v1/tasks/{task_id}").status_code == 404
     finally:
         repository.db_path = old_path
 

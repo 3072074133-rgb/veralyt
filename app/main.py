@@ -72,7 +72,6 @@ async def health() -> dict[str, str]:
     return {
         "status": "ok",
         "model": settings.ollama_model,
-        "embedding_model": settings.ollama_embedding_model,
     }
 
 

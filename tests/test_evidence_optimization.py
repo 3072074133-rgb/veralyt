@@ -4,7 +4,7 @@ import pytest
 
 from app import workflow
 from app.models import AnalysisState, EvidenceRecord
-from app.repository import repository, _cached_relationships
+from app.repository import repository
 
 
 @pytest.fixture
@@ -25,15 +25,14 @@ def test_batch_reads_ignore_other_tasks_and_empty_ids(evidence_task, monkeypatch
     assert repository.list_evidence_by_ids(evidence_task, []) == []
 
 
-def test_context_variants_share_one_batch_and_ignore_history(evidence_task, monkeypatch):
+def test_evidence_context_batch_ignores_other_evidence(evidence_task, monkeypatch):
     parser = Mock(wraps=repository._evidence_record)
     monkeypatch.setattr(repository, '_evidence_record', parser)
     state = AnalysisState(task_id=evidence_task, run_id='run', user_question='question', tool_results=[
         {'status': 'success', 'evidence_ids': ['ev_0']},
     ])
     with repository.evidence_scope(evidence_task):
-        for limit in (12, 8, 4):
-            assert len(workflow._draft_context(state, row_limit=limit)['evidence_catalog']) == 1
+        assert len(workflow._draft_context(state)['evidence_catalog']) == 1
         assert repository.get_evidence(evidence_task, 'ev_0').rows == [{'amount': 0}]
     assert parser.call_count == 1
     with repository.evidence_scope(evidence_task):
@@ -52,15 +51,3 @@ def test_validation_deserializes_each_evidence_once(evidence_task, monkeypatch):
               'metrics': [{'label': 'amount', 'value': '1', 'evidence_refs': ['ev_1'], 'evidence_pointers': [pointer]}]})
     assert workflow.validate_node(state)['validation']['passed']
     assert parser.call_count == 1
-
-
-def test_relationship_cache_returns_independent_models(evidence_task, monkeypatch):
-    _cached_relationships.cache_clear()
-    detector = Mock(return_value=[])
-    monkeypatch.setattr('app.dataset_retrieval.detect_dataset_relationships', detector)
-    repository.get_task(evidence_task)
-    repository.get_task(evidence_task)
-    assert detector.call_count == 1
-    repository.get_task(repository.create_task())
-    assert detector.call_count == 2
-    assert _cached_relationships.cache_info().maxsize == 128

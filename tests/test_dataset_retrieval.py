@@ -4,11 +4,8 @@ import pytest
 
 from app.config import settings
 from app.dataset_retrieval import (
-    detect_dataset_relationships,
-    is_placeholder_column_name,
     planner_catalog,
     query_catalog,
-    retrieve_datasets,
 )
 from app.llm import LLMContextOverflowError, LLMStructuredOutputError, OllamaGateway, _select_context
 from app.models import DatasetColumn, DatasetInfo, IntentDecision, QueryRequest
@@ -25,7 +22,7 @@ def _dataset(dataset_id: str, name: str, columns: list[DatasetColumn]) -> Datase
     )
 
 
-def test_retrieval_prefers_table_covering_department_and_profit() -> None:
+def test_planner_catalog_preserves_model_choice_across_all_tables() -> None:
     total = _dataset(
         "total",
         "KZE Total",
@@ -55,13 +52,9 @@ def test_retrieval_prefers_table_covering_department_and_profit() -> None:
         [DatasetColumn(name="Sales", display_name="Sales", data_type="Float64", null_count=0)],
     )
 
-    matches = retrieve_datasets("统计每个部门的盈亏", [unrelated, total])
-
-    assert matches[0].dataset.id == "total"
-    assert any("同时覆盖" in reason for reason in matches[0].reasons)
-    compact = planner_catalog(matches)
-    assert compact[0]["dataset_id"] == "total"
-    assert compact[0]["matched_samples"]["Department"]
+    compact = planner_catalog([unrelated, total])
+    assert [item["dataset_id"] for item in compact] == ["team", "total"]
+    assert compact[1]["fields"][0]["sample_values"]
 
 
 def test_structured_query_rejects_plain_text_instead_of_silent_fallback(
@@ -98,7 +91,7 @@ def test_model_call_is_rejected_before_context_overflow(monkeypatch: pytest.Monk
     assert called is False
 
 
-def test_wide_catalog_keeps_question_relevant_fields() -> None:
+def test_wide_catalog_preserves_all_fields_in_source_order() -> None:
     columns = [
         DatasetColumn(name=f"Other_{index}", display_name=f"Other {index}", data_type="String", null_count=0)
         for index in range(30)
@@ -114,14 +107,13 @@ def test_wide_catalog_keeps_question_relevant_fields() -> None:
     ]
     dataset = _dataset("wide", "宽表", columns)
 
-    compact = query_catalog(dataset, question="统计每个部门的利润", field_limit=2, sample_limit=0)
+    compact = query_catalog(dataset)
 
-    assert [item["name"] for item in compact["columns"]] == ["Department", "Profit"]
+    assert [item["name"] for item in compact["columns"]] == [column.name for column in columns]
     assert compact["field_count"] == 32
-    assert compact["fields_omitted"] == 30
 
 
-def test_retrieval_penalizes_placeholder_heavy_tables() -> None:
+def test_catalog_does_not_rank_or_remove_tables() -> None:
     noisy = _dataset(
         "noisy",
         "Warehouse · 区域 2",
@@ -151,45 +143,18 @@ def test_retrieval_penalizes_placeholder_heavy_tables() -> None:
         ],
     )
 
-    assert is_placeholder_column_name("未命名列3")
-    assert is_placeholder_column_name("Unnamed: 3")
-    matches = retrieve_datasets("分析报表", [noisy, summary])
-    assert matches[0].dataset.id == "summary"
+    catalog = planner_catalog([noisy, summary])
+    assert [item["dataset_id"] for item in catalog] == ["noisy", "summary"]
 
 
-def test_relationship_detection_requires_matching_samples() -> None:
-    orders = _dataset(
-        "orders", "订单明细", [DatasetColumn(
-            name="Department", display_name="Department", data_type="String", null_count=0,
-            role="dimension", semantic_type="category", sample_values=["销售", "运营"],
-        )],
-    )
-    departments = _dataset(
-        "departments", "部门信息", [DatasetColumn(
-            name="Department", display_name="Department", data_type="String", null_count=0,
-            role="dimension", semantic_type="category", sample_values=["销售", "运营", "财务"],
-        )],
-    )
-
-    relations = detect_dataset_relationships([orders, departments])
-
-    assert relations and relations[0]["left_field"] == "Department"
-    assert relations[0]["confidence"] >= 0.8
-
-
-def test_context_selection_compacts_before_escalating(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_context_selection_does_not_replace_model_context(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "model_context_tokens", 1024)
     monkeypatch.setattr(settings, "model_max_context_tokens", 2048)
     monkeypatch.setattr(settings, "model_default_output_tokens", 256)
     monkeypatch.setattr(settings, "model_input_safety_tokens", 128)
 
-    selection = _select_context(
-        "analysis_planner", "short prompt", [{"catalog": "x" * 5000}, {"catalog": "x" * 200}]
-    )
-
-    assert selection.variant_index == 1
-    assert selection.escalated is False
-    assert selection.budget.context_tokens == 1024
+    with pytest.raises(LLMContextOverflowError):
+        _select_context("analysis_planner", "short prompt", {"catalog": "x" * 10000})
 
 
 def test_context_selection_uses_maximum_window_only_when_needed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -198,7 +163,7 @@ def test_context_selection_uses_maximum_window_only_when_needed(monkeypatch: pyt
     monkeypatch.setattr(settings, "model_default_output_tokens", 256)
     monkeypatch.setattr(settings, "model_input_safety_tokens", 128)
 
-    selection = _select_context("analysis_planner", "short prompt", [{"catalog": "x" * 3000}])
+    selection = _select_context("analysis_planner", "short prompt", {"catalog": "x" * 3000})
 
     assert selection.escalated is True
     assert selection.budget.context_tokens == 2048
@@ -212,7 +177,7 @@ def test_structured_call_sets_context_and_output_limits(monkeypatch: pytest.Monk
         captured.update(kwargs)
         return SimpleNamespace(
             message=SimpleNamespace(
-                content='{"is_analysis":true,"reason":"ok","confidence":0.9,"suggested_response":null}',
+                content='{"route":"analysis","reason":"ok","reply":null}',
                 tool_calls=[],
             ),
             prompt_eval_count=20,
@@ -226,6 +191,6 @@ def test_structured_call_sets_context_and_output_limits(monkeypatch: pytest.Monk
         thinking=False, prompt_override="Return JSON",
     )
 
-    assert result.is_analysis is True
+    assert result.route == "analysis"
     assert captured["options"]["num_ctx"] == min(settings.model_context_tokens, 4096)
     assert captured["options"]["num_predict"] == settings.model_classifier_output_tokens

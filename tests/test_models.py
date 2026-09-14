@@ -28,11 +28,11 @@ def test_new_visualization_fields_keep_old_snapshots_compatible() -> None:
     assert draft.calculation_details == []
 
 
-def test_generated_report_is_bounded_without_breaking_historical_drafts() -> None:
+def test_generated_report_does_not_apply_backend_content_limits() -> None:
     findings = [Finding(detail=f"发现 {index}") for index in range(9)]
 
     historical = AnalysisDraft(summary="历史报告", findings=findings)
+    generated = GeneratedAnalysisDraft(summary="新报告", findings=findings)
 
     assert len(historical.findings) == 9
-    with pytest.raises(ValidationError):
-        GeneratedAnalysisDraft(summary="新报告", findings=findings)
+    assert len(generated.findings) == 9

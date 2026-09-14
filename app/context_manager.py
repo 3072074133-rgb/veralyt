@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from .config import settings
-from .llm import LLMStructuredOutputError, LLMUnavailableError, llm
+from .llm import LLMContextOverflowError, LLMStructuredOutputError, llm
 from .models import (
     AnalysisDraft,
     AnalysisMemory,
@@ -29,7 +29,11 @@ class ContextManager:
     def classification_context(self, task_id: str, messages: list[MessageRecord], *, current_question: str) -> ConversationContext:
         record = repository.get_conversation_memory(task_id)
         history = self._without_current_question(messages, current_question)
-        return ConversationContext(memory=record.memory if record else None, recent_messages=history[-4:])
+        covered = record.covered_until_sequence if record else 0
+        return ConversationContext(
+            memory=record.memory if record else None,
+            recent_messages=[item for item in history if item.sequence > covered],
+        )
 
     def prepare(
         self,
@@ -38,6 +42,7 @@ class ContextManager:
         *,
         current_question: str,
         dynamic_context: Any = None,
+        fits_context: Callable[[ConversationContext], bool] | None = None,
     ) -> tuple[ConversationContext, ContextBudget]:
         history = self._without_current_question(messages, current_question)
         record = repository.get_conversation_memory(task_id)
@@ -48,51 +53,72 @@ class ContextManager:
         available = self._available_message_tokens(dynamic_context)
         compacted = False
 
-        requests = 0
-        while requests < 2 and self._context_tokens(memory, unsummarized) > available:
-            candidates = unsummarized[:-settings.context_recent_messages]
+        def fits() -> bool:
+            if fits_context is not None:
+                return fits_context(ConversationContext(memory=memory, recent_messages=unsummarized))
+            return self._context_tokens(memory, unsummarized) <= available
+
+        while not fits():
+            candidates = unsummarized
             if not candidates:
-                break
+                raise LLMContextOverflowError("会话摘要仍超过模型上下文上限")
             batch = self._summary_batch(candidates, memory)
             if not batch:
-                break
+                raise LLMContextOverflowError("没有可用于会话摘要的历史消息")
             self._emit(task_id, "conversation.compacting", "正在整理较长会话")
-            updated: ConversationMemory | None = None
-            last_error: Exception | None = None
-            while batch and requests < 2:
-                try:
-                    requests += 1
-                    updated = llm.structured(
-                        "conversation_summarizer",
-                        {
-                            "previous_memory": memory.model_dump(mode="json") if memory else None,
-                            "messages_to_merge": [self._message_payload(item) for item in batch],
-                            "valid_evidence_ids": sorted(self._evidence_ids(task_id)),
-                        },
-                        ConversationMemory,
-                        thinking=False,
-                        max_attempts=1,
-                    )
-                    self._validate_evidence(task_id, updated)
-                    break
-                except LLMUnavailableError as exc:
-                    last_error = exc
-                    batch = []
-                except (LLMStructuredOutputError, ValueError, TypeError) as exc:
-                    last_error = exc
-                    batch = batch[: len(batch) // 2] if len(batch) > 1 else []
-                except Exception as exc:
-                    last_error = exc
-                    batch = []
-
-            if updated is None or not batch:
+            try:
+                while True:
+                    memory_size = estimate_tokens(memory.model_dump_json() if memory else '')
+                    output_budget = max(settings.model_summary_output_tokens, memory_size + 512)
+                    if output_budget > settings.model_summary_max_output_tokens:
+                        raise LLMContextOverflowError('历史会话摘要的已有记忆超出输出预算，原始消息及已验证记忆已保留；请提高摘要输出上限或在新任务中分析。')
+                    try:
+                        updated = llm.structured(
+                            "conversation_summarizer",
+                            {
+                                "previous_memory": memory.model_dump(mode="json") if memory else None,
+                                "messages_to_merge": [self._message_payload(item) for item in batch],
+                                "valid_evidence_ids": sorted(self._evidence_ids(task_id)),
+                            },
+                            ConversationMemory,
+                            thinking=False,
+                            max_attempts=3,
+                            output_tokens=output_budget,
+                            max_output_tokens=settings.model_summary_max_output_tokens,
+                        )
+                        break
+                    except (LLMContextOverflowError, LLMStructuredOutputError) as exc:
+                        if isinstance(exc, LLMStructuredOutputError) and 'done_reason=length' not in str(exc):
+                            raise LLMStructuredOutputError(f'历史会话摘要格式校验失败：{exc}') from exc
+                        if len(batch) == 1:
+                            raise type(exc)(f'历史会话摘要失败，最小消息批次仍无法处理；原始消息及已验证记忆已保留。{exc}') from exc
+                        batch = batch[:max(1, len(batch) // 2)]
+                previous_facts = memory.exact_facts if memory else []
+                preserved = {fact.model_dump_json(): fact for fact in previous_facts}
+                sources = {item.sequence: item.content for item in batch}
+                for fact in updated.exact_facts:
+                    key = fact.model_dump_json()
+                    if key in preserved:
+                        continue
+                    source = sources.get(fact.source_sequence, "")
+                    if (not fact.source_quote or fact.source_quote not in source
+                            or not fact.value or fact.value not in fact.source_quote
+                            or (fact.unit and fact.unit not in fact.source_quote)):
+                        raise ValueError(
+                            f"精确事实来源核对失败：消息 {fact.source_sequence}，"
+                            "引用必须逐字来自本批原文，数值和单位必须逐字存在于引用中。"
+                        )
+                    preserved[key] = fact
+                updated = updated.model_copy(update={"exact_facts": list(preserved.values())})
+                self._validate_evidence(task_id, updated)
+            except Exception as exc:
                 self._emit(
                     task_id,
                     "conversation.compaction_failed",
-                    "会话整理失败，已使用现有上下文继续分析",
-                    {"error": str(last_error or "未知错误")},
+                    "会话整理失败",
+                    {"error": str(exc)},
                 )
-                break
+                raise
 
             updated = updated.model_copy(update={"last_updated_at": utc_now()})
             record = repository.save_conversation_memory(
@@ -105,9 +131,10 @@ class ContextManager:
             unsummarized = [item for item in history if item.sequence > covered]
             compacted = True
 
-        recent = self._fit_messages(unsummarized, memory, available)
-        context = ConversationContext(memory=memory, recent_messages=recent)
-        tokens = self._context_tokens(memory, recent)
+        context = ConversationContext(memory=memory, recent_messages=unsummarized)
+        if compacted:
+            self._emit(task_id, "conversation.compacted", "正在思考")
+        tokens = self._context_tokens(memory, unsummarized)
         return context, ContextBudget(
             input_tokens=settings.context_base_overhead_tokens + tokens,
             message_tokens=tokens,
@@ -137,7 +164,7 @@ class ContextManager:
             evidence_ids=evidence_ids,
             limitations=list(draft.warnings),
         )
-        analyses = [*memory.completed_analyses, completed][-10:]
+        analyses = [*memory.completed_analyses, completed]
         references = sorted(set(memory.referenced_evidence_ids) | set(evidence_ids))
         updated = memory.model_copy(
             update={
@@ -187,21 +214,6 @@ class ContextManager:
                 break
             selected.append(item)
             used += cost
-        return selected
-
-    def _fit_messages(
-        self,
-        messages: list[MessageRecord],
-        memory: ConversationMemory | None,
-        available: int,
-    ) -> list[MessageRecord]:
-        selected: list[MessageRecord] = []
-        for item in reversed(messages):
-            candidate = [item, *selected]
-            if self._context_tokens(memory, candidate) <= available:
-                selected = candidate
-            elif selected:
-                break
         return selected
 
     @staticmethod

@@ -1,6 +1,6 @@
 ---
 prompt_name: conversation_summarizer
-prompt_version: 1.0.0
+prompt_version: 1.1.0
 response_model: ConversationMemory
 model: qwen3.5:4b
 thinking: false
@@ -20,6 +20,9 @@ temperature: 0
 7. 对重复信息进行合并，列表内容保持短而明确；已完成分析最多保留最相关的十项。
 8. 不输出思维过程、解释、Markdown 或 Schema 之外的字段。
 9. 严格按照 `ConversationMemory` JSON Schema 返回。
+10. 将消息中明确给出的金额、比例、数量、日期或阈值单独记录到 exact_facts，不仅写进概述。value 使用原文字符串，保留小数、正负号和精度，不换算、不四舍五入、不改成约数；unit 逐字保留，没有单位填空字符串。
+11. 每条事实填写 subject、metric、period（未明确则为空）、source_sequence 和 source_quote。source_quote 必须是对应消息的逐字连续原文，包含数值、单位及理解其含义所需上下文；source_sequence 使用输入消息序号。禁止虚构引用。
+12. 例如原文“客户A欠款6800元”，value 为“6800”，unit 为“元”，不得改成“几千”或“0.68万”。后续消息更正金额时另记一条新事实及其来源，在摘要中说明更正关系，不覆盖历史原值。已有 exact_facts 保持不变，不得改写。
 
 动态上下文由用户消息提供：
 

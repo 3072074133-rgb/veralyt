@@ -13,17 +13,6 @@ from .config import settings
 from .dataset_service import correct_dataset, create_task_from_revision, preview_dataset, profile_dataset
 from .exports import export_excel, export_html
 from .ingestion import IngestionError, ingest_file, task_dir
-from .knowledge_service import (
-    KnowledgeEmbeddingError,
-    archive_knowledge_base,
-    create_knowledge_base,
-    get_knowledge_base,
-    list_knowledge_bases,
-    list_run_matches,
-    list_task_bindings,
-    publish_knowledge_revision,
-    replace_task_bindings,
-)
 from .models import (
     CreateTaskResponse,
     DatasetAssetDetail,
@@ -33,12 +22,6 @@ from .models import (
     DatasetPreview,
     DatasetProfile,
     EvidenceRecord,
-    KnowledgeBaseCreate,
-    KnowledgeBaseDetail,
-    KnowledgeBaseList,
-    KnowledgeBindingRequest,
-    KnowledgeMatch,
-    KnowledgeRevisionCreate,
     MessageRequest,
     ReportDetail,
     ReportJob,
@@ -48,7 +31,6 @@ from .models import (
     TaskSnapshot,
     DatasetRelationship,
     RelationshipConfirmationRequest,
-    TaskKnowledgeBinding,
     TaskStatus,
     UploadBatchResponse,
     UploadFailure,
@@ -167,9 +149,7 @@ async def upload_files(
 
 @router.post("/tasks/{task_id}/messages", response_model=TaskSnapshot, status_code=status.HTTP_202_ACCEPTED)
 async def send_message(task_id: str, request: MessageRequest) -> TaskSnapshot:
-    snapshot = _snapshot(task_id)
-    if not snapshot.datasets:
-        raise HTTPException(400, "请先上传可分析的 Excel 或 CSV 文件")
+    _snapshot(task_id)
     content = request.content.strip()
     try:
         run_id = repository.queue_analysis(task_id, content)
@@ -187,20 +167,7 @@ async def get_task(task_id: str) -> TaskSnapshot:
 @router.get("/tasks/{task_id}/relationships", response_model=list[DatasetRelationship])
 async def get_task_relationships(task_id: str) -> list[DatasetRelationship]:
     snapshot = _snapshot(task_id)
-    from .dataset_retrieval import detect_dataset_relationships
-    detected = [DatasetRelationship.model_validate(item) for item in detect_dataset_relationships(snapshot.datasets)]
-    saved = {(
-        item.left_dataset_id, item.left_field, item.right_dataset_id, item.right_field
-    ): item for item in snapshot.relationships}
-    merged: list[DatasetRelationship] = []
-    for item in detected:
-        key = (item.left_dataset_id, item.left_field, item.right_dataset_id, item.right_field)
-        merged.append(saved.get(key, item))
-    for item in snapshot.relationships:
-        key = (item.left_dataset_id, item.left_field, item.right_dataset_id, item.right_field)
-        if key not in {(entry.left_dataset_id, entry.left_field, entry.right_dataset_id, entry.right_field) for entry in merged}:
-            merged.append(item)
-    return merged
+    return snapshot.relationships
 
 
 @router.post("/tasks/{task_id}/relationships", response_model=list[DatasetRelationship])
@@ -280,8 +247,8 @@ async def apply_dataset_corrections(
 
 
 @router.get("/datasets", response_model=DatasetAssetList)
-async def list_datasets(include_archived: bool = False) -> DatasetAssetList:
-    return repository.list_data_assets(include_archived)
+async def list_datasets() -> DatasetAssetList:
+    return repository.list_data_assets()
 
 
 @router.get("/datasets/{dataset_id}", response_model=DatasetAssetDetail)
@@ -293,13 +260,15 @@ async def get_dataset(dataset_id: str) -> DatasetAssetDetail:
 
 
 @router.delete("/datasets/{dataset_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def archive_dataset(dataset_id: str) -> Response:
+async def delete_dataset(dataset_id: str) -> Response:
     try:
-        repository.archive_data_asset(dataset_id)
+        repository.delete_data_asset(dataset_id)
     except KeyError as exc:
         raise HTTPException(404, "数据集不存在") from exc
     except PermissionError as exc:
         raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -316,90 +285,6 @@ async def analyze_dataset_revision(dataset_id: str, revision_id: str) -> CreateT
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     return CreateTaskResponse(id=task_id, status=TaskStatus.READY)
-
-
-@router.get("/knowledge-bases", response_model=KnowledgeBaseList)
-async def get_knowledge_bases(include_archived: bool = False) -> KnowledgeBaseList:
-    return list_knowledge_bases(include_archived)
-
-
-@router.post(
-    "/knowledge-bases", response_model=KnowledgeBaseDetail,
-    status_code=status.HTTP_201_CREATED,
-)
-async def create_private_knowledge_base(request: KnowledgeBaseCreate) -> KnowledgeBaseDetail:
-    try:
-        return await asyncio.to_thread(create_knowledge_base, request)
-    except KnowledgeEmbeddingError as exc:
-        raise HTTPException(503, str(exc)) from exc
-
-
-@router.get("/knowledge-bases/{knowledge_base_id}", response_model=KnowledgeBaseDetail)
-async def get_private_knowledge_base(knowledge_base_id: str) -> KnowledgeBaseDetail:
-    try:
-        return get_knowledge_base(knowledge_base_id)
-    except KeyError as exc:
-        raise HTTPException(404, "知识库不存在") from exc
-
-
-@router.post("/knowledge-bases/{knowledge_base_id}/revisions", response_model=KnowledgeBaseDetail)
-async def create_knowledge_revision(
-    knowledge_base_id: str, request: KnowledgeRevisionCreate
-) -> KnowledgeBaseDetail:
-    try:
-        return await asyncio.to_thread(publish_knowledge_revision, knowledge_base_id, request)
-    except KnowledgeEmbeddingError as exc:
-        raise HTTPException(503, str(exc)) from exc
-    except KeyError as exc:
-        raise HTTPException(404, "知识库不存在") from exc
-    except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
-
-
-@router.delete("/knowledge-bases/{knowledge_base_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_knowledge_base(knowledge_base_id: str) -> Response:
-    try:
-        archive_knowledge_base(knowledge_base_id)
-    except KeyError as exc:
-        raise HTTPException(404, "知识库不存在") from exc
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-
-@router.get(
-    "/tasks/{task_id}/knowledge-bases", response_model=list[TaskKnowledgeBinding]
-)
-async def get_task_knowledge_bases(task_id: str) -> list[TaskKnowledgeBinding]:
-    _snapshot(task_id)
-    return list_task_bindings(task_id)
-
-
-@router.post(
-    "/tasks/{task_id}/knowledge-bases", response_model=list[TaskKnowledgeBinding]
-)
-async def set_task_knowledge_bases(
-    task_id: str, request: KnowledgeBindingRequest
-) -> list[TaskKnowledgeBinding]:
-    snapshot = _snapshot(task_id)
-    if snapshot.pending_run_id:
-        raise HTTPException(409, "分析运行中，暂不能修改知识库")
-    try:
-        return replace_task_bindings(task_id, request.bindings)
-    except KeyError as exc:
-        raise HTTPException(404, "任务不存在") from exc
-    except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
-
-
-@router.get(
-    "/tasks/{task_id}/runs/{run_id}/knowledge", response_model=list[KnowledgeMatch]
-)
-async def get_run_knowledge(task_id: str, run_id: str) -> list[KnowledgeMatch]:
-    _snapshot(task_id)
-    try:
-        repository.get_run(task_id, run_id)
-    except KeyError as exc:
-        raise HTTPException(404, "分析运行不存在") from exc
-    return list_run_matches(run_id)
 
 
 @router.get("/tasks/{task_id}/runs", response_model=list[WorkflowRun])
@@ -554,6 +439,15 @@ async def get_report(report_id: str) -> ReportDetail:
         raise HTTPException(404, "报告不存在") from exc
 
 
+@router.delete('/reports/{report_id}', status_code=status.HTTP_204_NO_CONTENT)
+async def delete_saved_report(report_id: str) -> Response:
+    try:
+        repository.delete_report(report_id)
+    except KeyError as exc:
+        raise HTTPException(404, '报告不存在') from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.get("/reports/{report_id}/versions/{version_id}/download")
 async def download_report_version(report_id: str, version_id: str) -> FileResponse:
     try:
@@ -582,7 +476,10 @@ async def delete_task(task_id: str) -> None:
     }:
         raise HTTPException(409, "任务正在运行，完成后才能删除")
     directory = task_dir(task_id)
-    hard_deleted = repository.delete_task(task_id)
+    try:
+        hard_deleted = repository.delete_task(task_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
     root = (settings.data_dir / "tasks").resolve()
     resolved = directory.resolve()
     if hard_deleted and root in resolved.parents and resolved.exists():
@@ -591,8 +488,7 @@ async def delete_task(task_id: str) -> None:
 
 def _snapshot(task_id: str) -> TaskSnapshot:
     try:
-        snapshot = repository.get_task(task_id)
-        return snapshot.model_copy(update={"knowledge_bases": list_task_bindings(task_id)})
+        return repository.get_task(task_id)
     except KeyError as exc:
         raise HTTPException(404, "任务不存在") from exc
 

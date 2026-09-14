@@ -1,34 +1,25 @@
 from __future__ import annotations
 
+import json
 import re
-from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from .models import AnalysisState, EvidencePointer, Severity, ValidationIssue
 from .repository import repository
+from .report_generation import citation_id
 
 
 def validate_claim(
     state: AnalysisState,
     target: str,
-    text: str,
     evidence_refs: list[str],
     pointers: list[EvidencePointer],
-    *,
-    require_evidence: bool,
 ) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
-    if require_evidence and not evidence_refs:
-        issues.append(ValidationIssue(
-            code="missing_evidence",
-            message="结论缺少证据引用",
-            severity=Severity.ERROR,
-            target=target,
-        ))
-        return issues
+    if not evidence_refs or not pointers:
+        issues.append(ValidationIssue(code="missing_evidence", message="结论缺少证据引用；请提供支持该结论的单元格或计算结果引用，无法支持时由模型修改结论。", severity=Severity.ERROR, target=target))
     available = current_evidence_ids(state)
-    valid_pointers: list[EvidencePointer] = []
-    for pointer in pointers:
+    for pointer_index, pointer in enumerate(pointers):
         evidence = repository.get_evidence(state.task_id, pointer.evidence_id)
         cell_valid = (
             pointer.evidence_id in evidence_refs
@@ -37,6 +28,7 @@ def validate_claim(
             and 0 <= pointer.row_index < len(evidence.rows)
             and pointer.field in evidence.rows[pointer.row_index]
             and str(evidence.rows[pointer.row_index][pointer.field]) == pointer.raw_value
+            and (pointer.citation_id is None or pointer.citation_id == citation_id(pointer.evidence_id, pointer.row_index, pointer.field, pointer.raw_value))
         )
         # Derived claims point to a persisted calculation row.  Their
         # reliability comes from the input cell pointers and formula, rather
@@ -46,57 +38,88 @@ def validate_claim(
             input_valid = bool(pointer.formula and pointer.input_pointers)
             if input_valid:
                 input_valid = not validate_claim(
-                    state, target, "", evidence_refs,
-                    pointer.input_pointers, require_evidence=True,
+                    state,
+                    target,
+                    evidence_refs,
+                    pointer.input_pointers,
                 )
             is_valid = (
-                pointer.evidence_id in evidence_refs
-                and pointer.evidence_id in available
-                and evidence is not None
-                and 0 <= pointer.row_index < len(evidence.rows)
+                cell_valid
                 and input_valid
             )
         else:
             is_valid = cell_valid
         if not is_valid:
+            reasons = []
+            if pointer.evidence_id not in evidence_refs:
+                reasons.append('未在本结论 evidence_refs 中声明该证据 ID')
+            if pointer.evidence_id not in available or evidence is None:
+                reasons.append('证据 ID 不在本轮可用证据中')
+            elif not 0 <= pointer.row_index < len(evidence.rows):
+                reasons.append(f'row_index 从 0 开始，有效范围 0..{len(evidence.rows) - 1}')
+            else:
+                row = evidence.rows[pointer.row_index]
+                if pointer.field not in row:
+                    reasons.append(f'该行可用字段：{list(row)}')
+                elif str(row[pointer.field]) != pointer.raw_value:
+                    reasons.append(f'提交 raw_value={pointer.raw_value!r}，该单元格原值={str(row[pointer.field])!r}，须逐字一致')
+            if pointer.source_type == 'derived':
+                reasons.append('派生值须提供 formula 和有效 input_pointers；检查输入引用错误')
+            candidates = _candidate_value_pointers(pointer, evidence)
+            if candidates:
+                reasons.append(
+                    '根据项目名称、原值或当前行找到的可选数值引用（由模型按结论选择，不代表系统替换）：'
+                    + json.dumps(candidates, ensure_ascii=False, separators=(',', ':'))
+                )
             issues.append(ValidationIssue(
                 code="invalid_evidence_pointer",
-                message=f"证据单元格定位无效：{pointer.evidence_id}/{pointer.row_index}/{pointer.field}",
+                message=f"证据单元格定位无效：{pointer.evidence_id}/{pointer.row_index}/{pointer.field}。" + '；'.join(reasons) + '。依据证据目录自行修正引用，勿猜测数值。',
                 severity=Severity.ERROR,
-                target=target,
+                target=f"{target}.evidence_pointers[{pointer_index}]",
             ))
-        else:
-            valid_pointers.append(pointer)
-    ignored_terms = {
-        column
-        for evidence_id in evidence_refs
-        if (evidence := repository.get_evidence(state.task_id, evidence_id)) is not None
-        for column in evidence.columns
-    }
-    unsupported: list[str] = []
-    for token in numeric_tokens(text, ignored_terms=ignored_terms):
-        parsed = as_decimal(token)
-        supported_by_pointer = parsed is not None and any(
-            (
-                (raw := as_decimal(pointer.raw_value)) is not None
-                and numeric_values_match(token, parsed, raw, text)
-            )
-            or (token in pointer.raw_value and pointer.raw_value in text)
-            for pointer in valid_pointers
-        )
-        if parsed is None or not (
-            supported_by_pointer
-            or evidence_row_count_supports(token, text, evidence_refs, state.task_id)
-        ):
-            unsupported.append(token)
-    if unsupported:
-        issues.append(ValidationIssue(
-            code="unsupported_cell_value",
-            message=f"数字无法唯一定位到引用证据的单元格：{', '.join(unsupported)}",
-            severity=Severity.ERROR,
-            target=target,
-        ))
     return issues
+
+
+def _candidate_value_pointers(pointer: EvidencePointer, evidence: Any) -> list[dict[str, Any]]:
+    if evidence is None:
+        return []
+    matching_rows: list[tuple[int, dict[str, Any]]] = []
+    for index, row in enumerate(evidence.rows):
+        label_matches = any(str(value) == pointer.field for value in row.values())
+        value_matches = any(str(value) == pointer.raw_value for value in row.values())
+        if label_matches or value_matches or index == pointer.row_index:
+            matching_rows.append((index, row))
+    candidates: list[dict[str, Any]] = []
+    seen: set[tuple[int, str]] = set()
+    for row_index, row in matching_rows:
+        for field, value in row.items():
+            key = (row_index, field)
+            if key in seen or field in {'来源行号', 'source_row', 'source_row_number', 'excel_row'}:
+                continue
+            if not _is_numeric_value(value):
+                continue
+            seen.add(key)
+            candidates.append({
+                'citation_id': citation_id(pointer.evidence_id, row_index, field, value),
+                'context': row,
+                'evidence_id': pointer.evidence_id,
+                'row_index': row_index,
+                'field': field,
+                'raw_value': str(value),
+            })
+            if len(candidates) >= 6:
+                return candidates
+    return candidates
+
+
+def _is_numeric_value(value: Any) -> bool:
+    if isinstance(value, bool) or value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    return isinstance(value, str) and bool(re.fullmatch(
+        r'\s*[+-]?(?:\d[\d,]*)(?:\.\d+)?(?:%|元|万元|亿元|千元)?\s*', value,
+    ))
 
 
 def current_evidence_ids(state: AnalysisState) -> set[str]:
@@ -106,82 +129,3 @@ def current_evidence_ids(state: AnalysisState) -> set[str]:
         if result.get("status") == "success"
         for evidence_id in result.get("evidence_ids", [])
     }
-
-
-def evidence_row_count_supports(
-    token: str, text: str, evidence_refs: list[str], task_id: str
-) -> bool:
-    parsed = as_decimal(token)
-    if parsed is None or parsed != parsed.to_integral_value() or parsed < 0:
-        return False
-    count_phrase = re.compile(
-        rf"(?:共|合计|包含)?\s*{re.escape(token)}\s*(?:行|条|个(?:部门|类别|项目|结果|分组))"
-    )
-    if not count_phrase.search(text):
-        return False
-    expected = int(parsed)
-    return any(
-        (evidence := repository.get_evidence(task_id, evidence_id)) is not None
-        and len(evidence.rows) == expected
-        for evidence_id in evidence_refs
-    )
-
-
-def numeric_values_match(token: str, claim: Decimal, raw: Decimal, text: str) -> bool:
-    if claim == raw:
-        return True
-    if abs(claim) != abs(raw):
-        return False
-    if token.startswith("-"):
-        return raw < 0
-    if raw < 0:
-        return any(word in text for word in ("下降", "减少", "降低", "下滑", "低", "负", "亏损"))
-    return True
-
-
-def numeric_tokens(text: str, *, ignored_terms: set[str] | None = None) -> list[str]:
-    claim_text = text
-    # Spreadsheet-generated field names commonly contain identifiers such as
-    # "未命名列3". Their suffix is metadata, not a numeric business claim.
-    for term in sorted(ignored_terms or (), key=len, reverse=True):
-        if term and any(character.isdigit() for character in term) and not re.fullmatch(r'[\d,.%+-]+', term):
-            claim_text = claim_text.replace(term, "")
-    claim_text = re.sub(r"(?<!\d)\d{4}[-/]\d{1,2}(?:[-/]\d{1,2})?(?!\d)", "", claim_text)
-    claim_text = re.sub(r"\d{4}年", "", claim_text)
-    claim_text = re.sub(r"\d{1,2}\s*[-至到]\s*\d{1,2}月", "", claim_text)
-    claim_text = re.sub(r"\d{1,2}月", "", claim_text)
-    return re.findall(r"-?\d[\d,]*(?:\.\d+)?%?", claim_text)
-
-
-def unsupported_numbers(text: str, evidence_ids: list[str], task_id: str) -> list[str]:
-    raw_tokens = numeric_tokens(text)
-    if not raw_tokens:
-        return []
-    values: set[Decimal] = set()
-    for evidence_id in evidence_ids:
-        evidence = repository.get_evidence(task_id, evidence_id)
-        if evidence:
-            for row in evidence.rows:
-                for value in row.values():
-                    parsed = as_decimal(value)
-                    if parsed is not None:
-                        values.add(parsed)
-                        values.add(abs(parsed))
-    unsupported: list[str] = []
-    for token in raw_tokens:
-        parsed = as_decimal(token)
-        if parsed is not None and parsed not in values and abs(parsed) not in values:
-            unsupported.append(token)
-    return unsupported
-
-
-def as_decimal(value: Any) -> Decimal | None:
-    if value is None or isinstance(value, bool):
-        return None
-    normalized = str(value).strip().replace(",", "").rstrip("%")
-    if not re.fullmatch(r"-?\d+(?:\.\d+)?", normalized):
-        return None
-    try:
-        return Decimal(normalized)
-    except InvalidOperation:
-        return None

@@ -196,10 +196,9 @@ def ingest_file(
                         display_name=name,
                         data_type=str(frame.schema[name]),
                         null_count=frame[name].null_count(),
-                        sample_values=(samples := [
+                        sample_values=[
                             _json_value(value) for value in frame[name].drop_nulls().head(3).to_list()
-                        ]),
-                        **_infer_column_semantics(name, str(frame.schema[name]), samples),
+                        ],
                     )
                     for name in frame.columns
                 ]
@@ -838,64 +837,6 @@ def _coerce_frame(frame: pl.DataFrame) -> pl.DataFrame:
             continue
         expressions.append(column)
     return frame.select(expressions)
-
-
-def _infer_column_semantics(name: str, data_type: str, samples: list[Any]) -> dict[str, Any]:
-    """Infer conservative finance semantics without sending raw values to an LLM."""
-    lowered = name.casefold().replace(" ", "")
-    is_numeric = any(token in data_type.casefold() for token in ("int", "float", "decimal"))
-    is_temporal = any(token in data_type.casefold() for token in ("date", "time")) or any(
-        token in lowered for token in ("日期", "时间", "期间", "月份", "年度", "year", "month", "date")
-    )
-    is_identifier = any(
-        token in lowered for token in ("编号", "编码", "单号", "凭证号", "客户id", "供应商id", "code")
-    ) or lowered in {"id", "来源行号", "行次"}
-    is_percentage = any(
-        token in lowered for token in ("占比", "百分比", "比例", "比率", "percent", "ratio", "rate", "%")
-    ) or lowered.endswith("率")
-    is_amount = any(
-        token in lowered
-        for token in (
-            "金额", "收入", "营收", "销售额", "成本", "费用", "利润", "余额", "预算", "实际",
-            "应收", "应付", "回款", "税额", "amount", "revenue", "sales", "profit", "cost", "expense",
-        )
-    )
-
-    if is_identifier:
-        semantic_type, role, aggregation, confidence = "id", "identifier", "none", 0.95
-    elif is_temporal:
-        semantic_type, role, aggregation, confidence = "date", "dimension", "none", 0.95
-    elif is_percentage:
-        semantic_type, role, aggregation, confidence = "percentage", "measure", "average", 0.9
-    elif is_amount and is_numeric:
-        semantic_type, role, aggregation, confidence = "amount", "measure", "sum", 0.95
-    elif is_numeric:
-        semantic_type, role, aggregation, confidence = "metric", "measure", "sum", 0.7
-    elif any(token in lowered for token in ("名称", "姓名", "name")):
-        semantic_type, role, aggregation, confidence = "name", "dimension", "none", 0.85
-    else:
-        semantic_type, role, aggregation, confidence = "category", "dimension", "none", 0.65
-
-    joined_samples = " ".join(str(value) for value in samples)
-    currency = None
-    if any(token in f"{name} {joined_samples}" for token in ("人民币", "¥", "￥", "CNY", "RMB")):
-        currency = "CNY"
-    elif "$" in joined_samples or "USD" in name.upper():
-        currency = "USD"
-
-    unit = "%" if semantic_type == "percentage" else None
-    for candidate in ("万元", "亿元", "千元", "元"):
-        if candidate in name:
-            unit = candidate
-            break
-    return {
-        "semantic_type": semantic_type,
-        "role": role,
-        "unit": unit,
-        "currency": currency,
-        "default_aggregation": aggregation,
-        "semantic_confidence": confidence,
-    }
 
 
 def _normalize_headers(columns: Iterable[str]) -> dict[str, str]:

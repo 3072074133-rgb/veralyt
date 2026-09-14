@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { ChevronDown, ChevronRight, Download, FileText, RefreshCw } from 'lucide-vue-next'
-import { ElMessage } from 'element-plus'
+import { ChevronDown, ChevronRight, Download, FileText, RefreshCw, Trash2 } from 'lucide-vue-next'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import 'element-plus/es/components/message-box/style/css'
 import { api } from '../api'
 import type { ReportDetail, ReportSummary } from '../types'
 
@@ -20,6 +21,17 @@ async function toggle(item: ReportSummary) {
   expanded.value = expanded.value === item.id ? '' : item.id
   if (expanded.value && !details.value[item.id]) details.value[item.id] = await api.getReport(item.id)
 }
+async function remove(item: ReportSummary) {
+  try {
+    await ElMessageBox.confirm(`永久删除“${item.title}”及所有报告版本？此操作不可恢复。`, '删除报告', { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' })
+    await api.deleteReport(item.id)
+    delete details.value[item.id]
+    expanded.value = ''
+    await load()
+  } catch (reason) {
+    if (reason !== 'cancel' && reason !== 'close') ElMessage.error(reason instanceof Error ? reason.message : '删除失败')
+  }
+}
 function download(reportId: string, versionId: string) { window.location.href = `/api/v1/reports/${reportId}/versions/${versionId}/download` }
 function formatTime(value: string) { return new Date(value).toLocaleString('zh-CN', {hour12: false}) }
 </script>
@@ -31,7 +43,7 @@ function formatTime(value: string) { return new Date(value).toLocaleString('zh-C
       <div v-if="items.length" class="asset-table report-table">
         <div class="asset-row asset-head"><span>报告</span><span>最新版本</span><span>状态</span><span>更新时间</span><span></span></div>
         <template v-for="item in items" :key="item.id">
-          <div class="asset-row"><button class="asset-name" @click="toggle(item)"><component :is="expanded === item.id ? ChevronDown : ChevronRight" :size="16" /><FileText :size="16" /><span><strong>{{ item.title }}</strong><small>{{ item.id.slice(0, 8) }}</small></span></button><strong>v{{ item.latest_version }}</strong><span class="status-pill completed">已发布</span><span>{{ formatTime(item.updated_at) }}</span><router-link class="open-button" :to="`/tasks/${item.task_id}`">打开任务</router-link></div>
+          <div class="asset-row"><button class="asset-name" @click="toggle(item)"><component :is="expanded === item.id ? ChevronDown : ChevronRight" :size="16" /><FileText :size="16" /><span><strong>{{ item.title }}</strong><small>{{ item.id.slice(0, 8) }}</small></span></button><strong>v{{ item.latest_version }}</strong><span class="status-pill completed">已发布</span><span>{{ formatTime(item.updated_at) }}</span><div class="row-actions"><button class="icon-button" title="删除报告" aria-label="删除报告" @click="remove(item)"><Trash2 :size="16" /></button><router-link class="open-button" :to="`/tasks/${item.task_id}`">打开任务</router-link></div></div>
           <div v-if="expanded === item.id" class="revision-list"><div v-for="version in details[item.id]?.versions" :key="version.id" class="revision-row report-version"><strong>v{{ version.version_number }}</strong><span>{{ formatTime(version.created_at) }}</span><span>数据版本 {{ version.content.provenance.data_revision }}</span><code>{{ version.content_hash.slice(0, 12) }}</code><button class="button" @click="download(item.id, version.id)"><Download :size="15" />下载</button></div></div>
         </template>
       </div>

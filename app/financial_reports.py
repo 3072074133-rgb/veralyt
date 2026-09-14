@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 from .config import settings
-from .models import AnalysisDraft, DatasetInfo, EvidencePointer, Finding, Metric
+from .models import DatasetInfo
 
 
 FIELDS = {
@@ -120,38 +120,7 @@ def query_financial_report(task_id: str, datasets: list[DatasetInfo], run_id: st
                     - amount('资产负债表', '应交税费', '月初余额'))
         check('简化服务业务净利润调整经营现金流', adjusted
               - amount('现金流量表', '经营活动现金流量净额', '本月金额'))
-    failed = [r['项目'] for r in checks if abs(Decimal(r['金额'])) > Decimal('0.005')]
-    # Source contradictions are reported, not silently corrected or hidden.
     derived = _persist_result(task_id, 'query_data', {'strategy': 'financial_report', 'sql': sql,
         'source_evidence_ids': result.evidence_ids, 'checks': checks}, '月度财务报表项目及核对',
         rows + checks, run_id, source_dataset_ids=[d.id for d in datasets])
-    derived.warnings = [f'财务勾稽不一致：{name}' for name in failed]
     return derived
-
-
-def financial_draft(result: dict) -> AnalysisDraft:
-    evidence_id = result['evidence_ids'][0]
-    rows = result['rows']
-    metrics, findings = [], []
-    headline = {('利润表', '营业收入', '本月金额'), ('利润表', '营业成本', '本月金额'),
-                ('利润表', '净利润', '本月金额'), ('资产负债表', '资产总计', '月末余额'),
-                ('现金流量表', '月末现金及现金等价物余额', '本月金额'),
-                ('应收账款', '明细汇总', '月末余额'), ('应付账款', '明细汇总', '月末余额'),
-                ('费用明细', '明细汇总', '本月发生额')}
-    for index, row in enumerate(rows):
-        pointer = EvidencePointer(evidence_id=evidence_id, row_index=index, field='金额',
-                                  raw_value=str(row['金额']))
-        label = f"{row['报表']} · {row['项目']} · {row['口径']}"
-        if (row['报表'], row['项目'], row['口径']) in headline:
-            metrics.append(Metric(label=label, value=f"{Decimal(str(row['金额'])):,.2f}", evidence_refs=[evidence_id],
-                                  evidence_pointers=[pointer]))
-        if row['报表'] == '勾稽核对':
-            findings.append(Finding(title=row['项目'], detail=f"核对差额为{Decimal(str(row['金额'])):,.2f}。",
-                                    severity='warning' if abs(Decimal(str(row['金额']))) > Decimal('0.005') else 'info',
-                                    evidence_refs=[evidence_id], evidence_pointers=[pointer]))
-    return AnalysisDraft(title='月度财务报表分析',
-        summary='已按报表项目提取利润、资产负债及现金流数据，并按明细核对应收、应付和费用；具体差额见核对结果。',
-        summary_evidence_refs=[evidence_id], metrics=metrics, findings=findings,
-        warnings=result.get('warnings', []),
-        assumptions=['金额和单位沿用原表；不将合计行重复加入明细，不将到期日当作经营期间。',
-                     '核对范围仅覆盖已识别项目；跨表收入成本核对适用于全部通过往来记录的服务业务。'])

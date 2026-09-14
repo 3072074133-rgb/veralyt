@@ -8,7 +8,6 @@ from app.config import settings
 from app.ingestion import (
     IngestionError,
     _coerce_frame,
-    _infer_column_semantics,
     _read_csv,
     _read_xlsx,
     _rows_to_frame,
@@ -35,19 +34,6 @@ def test_excel_text_values_are_coerced() -> None:
     converted = _coerce_frame(frame)
     assert converted.schema["日期"] == pl.Date
     assert converted.schema["收入"] == pl.Int64
-
-
-def test_finance_column_semantics_are_inferred_conservatively() -> None:
-    amount = _infer_column_semantics("收入金额（万元）", "Float64", [120.5, 98.2])
-    period = _infer_column_semantics("月份", "String", ["2026-01", "2026-02"])
-    ratio = _infer_column_semantics("毛利率", "Float64", [12.5, 13.1])
-
-    assert amount["semantic_type"] == "amount"
-    assert amount["role"] == "measure"
-    assert amount["default_aggregation"] == "sum"
-    assert amount["unit"] == "万元"
-    assert period["semantic_type"] == "date" and period["role"] == "dimension"
-    assert ratio["semantic_type"] == "percentage" and ratio["default_aggregation"] == "average"
 
 
 def test_xlsx_imports_visible_data_sheets_and_skips_hidden_sheet(tmp_path: Path) -> None:
