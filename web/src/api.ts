@@ -1,4 +1,4 @@
-import type { DatasetAsset, DatasetAssetDetail, DatasetCorrectionRequest, DatasetCorrectionResult, DatasetPreview, DatasetProfile, DatasetRelationship, EvidenceRecord, ReportDetail, ReportJob, ReportSummary, RunArtifact, TaskListResponse, TaskSnapshot, UploadBatchResponse, WorkflowRun } from './types'
+import type { DatasetAsset, DatasetAssetDetail, DatasetCorrectionRequest, DatasetCorrectionResult, DatasetPreview, DatasetProfile, DatasetRelationship, EvidenceRecord, ModelConnectionResult, ModelSettings, ModelSettingsUpdate, ReportDetail, ReportJob, ReportSummary, RunArtifact, TaskListResponse, TaskSnapshot, UploadBatchResponse, WorkflowRun } from './types'
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, options)
@@ -11,11 +11,15 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  getSettings: () => request<{llm: ModelSettings}>('/api/v1/settings'),
+  saveSettings: (payload: {llm: ModelSettingsUpdate}) => request<{llm: ModelSettings}>('/api/v1/settings', { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) }),
+  testModelConnection: (payload: {llm: ModelSettingsUpdate}) => request<ModelConnectionResult>('/api/v1/settings/test', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) }),
   async createTask(): Promise<string> {
     const result = await request<{id: string}>('/api/v1/tasks', { method: 'POST' })
     return result.id
   },
   getTask: (id: string) => request<TaskSnapshot>(`/api/v1/tasks/${id}`),
+  removeFile: (taskId: string, fileId: string) => request<TaskSnapshot>(`/api/v1/tasks/${taskId}/files/${fileId}`, { method: 'DELETE' }),
   getTaskRelationships: (taskId: string) => request<DatasetRelationship[]>(`/api/v1/tasks/${taskId}/relationships`),
   saveTaskRelationships: (taskId: string, relationships: DatasetRelationship[]) => request<DatasetRelationship[]>(`/api/v1/tasks/${taskId}/relationships`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ relationships }) }),
   getDatasetPreview: (taskId: string, datasetId: string, page = 1, pageSize = 50) => request<DatasetPreview>(`/api/v1/tasks/${taskId}/datasets/${datasetId}/preview?page=${page}&page_size=${pageSize}`),
@@ -24,7 +28,9 @@ export const api = {
   listDatasets: () => request<{items: DatasetAsset[]; total: number}>('/api/v1/datasets'),
   getDataset: (id: string) => request<DatasetAssetDetail>(`/api/v1/datasets/${id}`),
   deleteDataset: (id: string) => request<void>(`/api/v1/datasets/${id}`, { method: 'DELETE' }),
+  deleteDatasetRevision: (id: string, revisionId: string) => request<void>(`/api/v1/datasets/${id}/revisions/${revisionId}`, { method: 'DELETE' }),
   createTaskFromDataset: (datasetId: string, revisionId: string) => request<{id: string; status: string}>(`/api/v1/datasets/${datasetId}/revisions/${revisionId}/tasks`, { method: 'POST' }),
+  createDatasetEditor: (datasetId: string, revisionId: string) => request<{id: string; status: string}>(`/api/v1/datasets/${datasetId}/revisions/${revisionId}/tasks?editing=true`, { method: 'POST' }),
   async uploadFiles(id: string, files: File[]) {
     const form = new FormData()
     files.forEach((file) => form.append('files', file))
@@ -50,6 +56,7 @@ export const api = {
     }
   },
   sendMessage: (id: string, content: string) => request<TaskSnapshot>(`/api/v1/tasks/${id}/messages`, { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ content }) }),
+  retryRun: (id: string, runId: string) => request<TaskSnapshot>(`/api/v1/tasks/${id}/runs/${runId}/retry`, { method: 'POST' }),
   async listTasks(query = '', status = '', page = 1, pageSize = 20) {
     const params = new URLSearchParams({ query, page: String(page), page_size: String(pageSize) })
     if (status) params.set('status', status)

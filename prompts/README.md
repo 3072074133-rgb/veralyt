@@ -10,9 +10,9 @@ users and financial vocabulary are Chinese.
 | --- | --- | --- | --- |
 | Intent classification | `intent_classifier.md` | `IntentDecision` | Off |
 | Requirement interpretation and planning | `analysis_planner.md` | `PlanDecision` | On |
-| Query specification | `tool_orchestrator.md` | `QueryDecision` for the planner-selected dataset | On |
 | Draft generation | `draft_writer.md` | `AnalysisDraft` | Off |
-| Reflection review | `reflection_reviewer.md` | `ReflectionDecision` | Off |
+| Query result decision | `result_reviewer.md` | `ResultDecision` | Off |
+| Final report review | `final_reviewer.md` | `ReflectionDecision` | Off |
 | Conversation summarization | `conversation_summarizer.md` | `ConversationMemory` | Off |
 
 Conversation summarization runs before the graph when the context budget is
@@ -23,7 +23,7 @@ The following workflow nodes are deterministic and must not call an LLM:
 
 - start and task creation
 - file validation, parsing, profiling, and DuckDB import
-- evidence ID, cell pointer, and chart field validation
+- stable evidence identity and chart rendering
 - revision routing and retry-budget checks
 - final API response assembly
 - end
@@ -38,10 +38,10 @@ For structured-output nodes, pass the matching Pydantic JSON Schema through
 Ollama's `format` parameter and validate the returned content again with
 `model_validate_json`. Set `extra="forbid"` on all response models.
 
-For query-generation steps, expose only the planner-selected dataset schema.
-The model returns a typed `QueryDecision`; the application binds the trusted
-dataset ID, validates the specification, executes the query, and wraps the
-result before updating graph state.
+The planning node receives every dataset's physical table name, exact schema,
+source range, and bounded sample rows. It returns typed plan steps containing
+read-only DuckDB SQL. The executor validates table scope and safety limits,
+executes the SQL, and wraps the result before updating graph state.
 
 ## Shared safety rules
 
@@ -58,8 +58,8 @@ All node implementations must enforce these rules outside the prompt as well:
    assumptions, issues, tool calls, and evidence references only.
 6. Invalid structured output gets one repair attempt. A second failure ends the
    node with a typed error.
-7. Structural validation failures are reviewed by the model, which chooses
-   whether to finish, replan, or rewrite within the configured retry budget.
+7. Query sufficiency and final report correctness are decided by model nodes.
+   Backend structural diagnostics never veto a model-approved report.
 
 ## Versioning
 

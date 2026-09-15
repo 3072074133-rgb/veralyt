@@ -4,17 +4,20 @@ import pytest
 
 from app.config import settings
 from app.llm import LLMUnavailableError, llm
-from app.models import DatasetQuerySpec, IntentDecision, PlanDecision, QueryDecision
+from app.analysis_tools import _validate_sql
+from app.models import IntentDecision, PlanDecision
 
 
 DATASET = {
-    "id": "golden-monthly-revenue",
+    "dataset_id": "golden-monthly-revenue",
+    "table_name": "monthly_revenue",
     "display_name": "月度经营数据",
     "row_count": 3,
-    "columns": [
-        {"name": "月份", "display_name": "月份", "data_type": "String", "semantic_type": "date", "role": "dimension", "sample_values": ["2026-01", "2026-02"]},
-        {"name": "收入", "display_name": "收入", "data_type": "Int64", "semantic_type": "amount", "role": "measure", "default_aggregation": "sum", "sample_values": [100, 120]},
+    "fields": [
+        {"name": "月份", "type": "VARCHAR"},
+        {"name": "收入", "type": "BIGINT"},
     ],
+    "sample_rows": [{"月份": "2026-01", "收入": 100}, {"月份": "2026-02", "收入": 120}],
 }
 
 
@@ -57,7 +60,11 @@ def test_local_model_preserves_finance_intent_plan_and_query(record_property) ->
                 "conversation_context": {},
                 "dataset_catalog": [DATASET],
                 "confirmed_policies": {},
-                "available_tools": ["profile_table", "query_data", "query_financial_report", "query_overdue", "query_department_profit"],
+                "previous_result": {},
+                "evidence_catalog": [],
+                "query_failures": [],
+                "result_decision": None,
+                "remaining_tool_calls": 8,
                 "current_plan": None,
                 "completed_step_ids": [],
                 "revision_feedback": None,
@@ -65,27 +72,14 @@ def test_local_model_preserves_finance_intent_plan_and_query(record_property) ->
             PlanDecision,
             thinking=True,
         )
-        query = llm.structured(
-            "tool_orchestrator",
-            {
-                "user_question": "按月份汇总收入，并按时间升序展示",
-                "analysis_plan": plan.model_dump(mode="json"),
-                "current_step": plan.steps[0].model_dump(mode="json"),
-                "selected_dataset": DATASET,
-                "available_results": [],
-                "latest_validation_failure": None,
-            },
-            QueryDecision,
-            thinking=True,
-        )
     except LLMUnavailableError as exc:
         pytest.fail(str(exc))
 
     assert intent.route == "analysis"
     assert plan.action == "analyze" and plan.steps
-    assert query.model_dump(mode="json") == DatasetQuerySpec.model_validate(
-        query.model_dump(mode="json")
-    ).model_dump(mode="json")
-    assert query.dimensions == ["月份"]
-    assert any(item.field == "收入" and item.aggregation == "sum" for item in query.measures)
-    assert query.descending is False
+    step = plan.steps[0]
+    assert step.dataset_ids == ["golden-monthly-revenue"]
+    _validate_sql(step.sql, {"monthly_revenue"})
+    lowered = step.sql.lower()
+    assert "sum" in lowered and "order by" in lowered
+    assert "月份" in step.sql and "收入" in step.sql

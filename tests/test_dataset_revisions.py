@@ -45,6 +45,13 @@ def test_multisheet_workbook_is_one_asset_with_multiple_tables(tmp_path: Path) -
             assert assets["items"][0]["name"] == "经营数据"
             detail = client.get(f"/api/v1/datasets/{assets['items'][0]['id']}").json()
             assert {table["display_name"] for table in detail["revisions"][0]["tables"]} == {"收入", "成本"}
+            editor = client.post(f"/api/v1/datasets/{detail['id']}/revisions/{detail['revisions'][0]['id']}/tasks?editing=true")
+            assert editor.status_code == 201, editor.text
+            editor_id = editor.json()['id']
+            assert repository.get_task(editor_id).datasets
+            assert editor_id not in {item.id for item in repository.list_tasks('', None, 1, 100).items}
+            assert client.delete(f'/api/v1/tasks/{editor_id}').status_code == 204
+            assert repository.get_data_asset(detail['id']).revisions
 
             income = next(
                 table for table in uploaded.json()["task"]["datasets"] if table["display_name"] == "收入"
@@ -61,6 +68,20 @@ def test_multisheet_workbook_is_one_asset_with_multiple_tables(tmp_path: Path) -
             revised = client.get(f"/api/v1/datasets/{assets['items'][0]['id']}").json()
             assert len(revised["revisions"][0]["tables"]) == 2
             assert {table["display_name"] for table in revised["revisions"][0]["tables"]} == {"收入", "成本"}
+            asset_id = assets['items'][0]['id']
+            removed_id = revised['revisions'][0]['id']
+            assert client.delete(f'/api/v1/datasets/{asset_id}/revisions/{removed_id}').status_code == 204
+            remaining = client.get(f'/api/v1/datasets/{asset_id}').json()
+            assert remaining['latest_revision'] == 1
+            assert len(remaining['revisions']) == 1
+            assert repository.revision_table_records(asset_id, removed_id)
+            assert client.delete(f"/api/v1/datasets/{asset_id}/revisions/{remaining['revisions'][0]['id']}").status_code == 409
+            next_revision = client.post(
+                f"/api/v1/tasks/{task_id}/datasets/{income['id']}/corrections",
+                json={'expected_data_revision': 2, 'cell_updates': [{'row_id': 1, 'column': '金额', 'value': 140}]},
+            )
+            assert next_revision.status_code == 200, next_revision.text
+            assert next_revision.json()['revision_number'] == 3
     finally:
         repository.db_path = old_path
 

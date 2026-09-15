@@ -178,6 +178,7 @@ class Repository(ReportRepositoryMixin):
             connection.executescript(SCHEMA)
             apply_migrations(connection, self.db_path)
             self._ensure_column(connection, "tasks", "active_run_id", "TEXT")
+            self._ensure_column(connection, "tasks", "is_editor", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "tasks", "data_revision", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "files", "detected_sheet_count", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "files", "skipped_sheet_count", "INTEGER NOT NULL DEFAULT 0")
@@ -219,16 +220,16 @@ class Repository(ReportRepositoryMixin):
             self._materialize_asset_files(connection)
             self._backfill_revision_table_bindings(connection)
 
-    def create_task(self) -> str:
+    def create_task(self, *, is_editor: bool = False) -> str:
         task_id = str(uuid.uuid4())
         now = utc_now()
         with self.connect() as connection:
             connection.execute(
                 """INSERT INTO tasks(
                 id,title,status,progress,status_message,result_json,clarification_question,error,
-                created_at,updated_at,active_run_id,data_revision)
-                VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, NULL, 0)""",
-                (task_id, "新建分析", TaskStatus.READY, 0, "等待上传数据", now, now),
+                created_at,updated_at,active_run_id,data_revision,is_editor)
+                VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?, NULL, 0, ?)""",
+                (task_id, "新建分析", TaskStatus.READY, 0, "等待上传数据", now, now, int(is_editor)),
             )
         self.add_event(task_id, "task.created", TaskStatus.READY, 0, "分析任务已创建")
         return task_id
@@ -338,6 +339,30 @@ class Repository(ReportRepositoryMixin):
                 ),
             )
 
+    def remove_task_file(self, task_id: str, file_id: str) -> None:
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            task = connection.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if task is None:
+                raise KeyError(task_id)
+            if task['status'] not in ('ready', 'completed', 'completed_with_warnings', 'failed', 'cancelled', 'off_topic', 'needs_clarification'):
+                raise ValueError("任务正在运行，请完成后再移除文件")
+            if connection.execute("SELECT 1 FROM execution_runs WHERE task_id=? AND status IN ('queued','running')", (task_id,)).fetchone():
+                raise ValueError("任务正在运行，请完成后再移除文件")
+            if not connection.execute("SELECT 1 FROM files WHERE id=? AND task_id=?", (file_id, task_id)).fetchone():
+                raise KeyError(file_id)
+            # Keep physical data and run snapshots available for historical reports.
+            connection.execute("DELETE FROM datasets WHERE task_id=? AND file_id=?", (task_id, file_id))
+            connection.execute("DELETE FROM files WHERE task_id=? AND id=?", (task_id, file_id))
+            connection.execute("DELETE FROM task_relationships WHERE task_id=?", (task_id,))
+            connection.execute("DELETE FROM conversation_memories WHERE task_id=?", (task_id,))
+            connection.execute(
+                """UPDATE tasks SET data_revision=data_revision+1,
+                clarification_question=NULL, error=NULL, status='ready',
+                progress=0, status_message='文件已移除', updated_at=? WHERE id=?""",
+                (utc_now(), task_id),
+            )
+
     def update_file(self, item: UploadedFile) -> None:
         with self.connect() as connection:
             connection.execute(
@@ -418,7 +443,7 @@ class Repository(ReportRepositoryMixin):
             sequence = cursor.lastrowid
         return message.model_copy(update={"sequence": sequence})
 
-    def queue_analysis(self, task_id: str, content: str) -> str:
+    def queue_analysis(self, task_id: str, content: str, *, retry_run_id: str | None = None) -> str:
         """Atomically persist the user message and its queued workflow run."""
         run_id = str(uuid.uuid4())
         message_id = str(uuid.uuid4())
@@ -442,11 +467,24 @@ class Repository(ReportRepositoryMixin):
                     (task_id, task["data_revision"]),
                 ).fetchone()
                 parent_run_id = parent["id"] if parent else None
-            cursor = connection.execute(
-                "INSERT INTO messages VALUES (?, ?, 'user', ?, ?)",
-                (message_id, task_id, content, now),
-            )
-            message_sequence = int(cursor.lastrowid)
+            if retry_run_id:
+                original = connection.execute(
+                    "SELECT * FROM execution_runs WHERE task_id=? AND id=?",
+                    (task_id, retry_run_id),
+                ).fetchone()
+                if original is None:
+                    raise KeyError(retry_run_id)
+                if original['status'] not in ('failed', 'cancelled'):
+                    raise RuntimeError('只能重新生成失败或已取消的分析')
+                content = original['question']
+                message_sequence = original['message_sequence']
+                parent_run_id = retry_run_id
+            else:
+                cursor = connection.execute(
+                    "INSERT INTO messages VALUES (?, ?, 'user', ?, ?)",
+                    (message_id, task_id, content, now),
+                )
+                message_sequence = int(cursor.lastrowid)
             connection.execute(
                 """INSERT INTO execution_runs(
                 id,task_id,question,status,error,started_at,finished_at,parent_run_id,
@@ -1139,6 +1177,7 @@ class Repository(ReportRepositoryMixin):
     def list_tasks(self, query: str, status: str | None, page: int, page_size: int) -> TaskListResponse:
         clauses, params = [
             "t.archived_at IS NULL",
+            "t.is_editor=0",
             "(EXISTS(SELECT 1 FROM files f0 WHERE f0.task_id=t.id) "
             "OR EXISTS(SELECT 1 FROM messages m0 WHERE m0.task_id=t.id) "
             "OR EXISTS(SELECT 1 FROM execution_runs r0 WHERE r0.task_id=t.id))"
@@ -1260,7 +1299,7 @@ class Repository(ReportRepositoryMixin):
                 raise KeyError(source_dataset_id)
             revision_id = str(uuid.uuid4())
             table_revision_id = str(uuid.uuid4())
-            revision_number = int(current["latest_revision"]) + 1
+            revision_number = connection.execute("SELECT COALESCE(MAX(revision_number),0)+1 FROM dataset_revisions WHERE dataset_id=?", (current['dataset_id'],)).fetchone()[0]
             asset_dir = settings.data_dir / "assets" / current["dataset_id"] / f"v{revision_number}"
             asset_dir.mkdir(parents=True, exist_ok=True)
             persistent_path = asset_dir / f"{source_dataset_id}.parquet"
@@ -1378,7 +1417,7 @@ class Repository(ReportRepositoryMixin):
                 (dataset_id,),
             ).fetchone()
             revisions = connection.execute(
-                "SELECT * FROM dataset_revisions WHERE dataset_id=? ORDER BY revision_number DESC",
+                "SELECT * FROM dataset_revisions WHERE dataset_id=? AND status='published' ORDER BY revision_number DESC",
                 (dataset_id,),
             ).fetchall()
             revision_models = []
@@ -1463,6 +1502,23 @@ class Repository(ReportRepositoryMixin):
             task_id, "dataset.bound", TaskStatus.READY, 15, "指定数据版本已就绪",
             {"dataset_id": asset.id, "revision_id": revision_id},
         )
+
+    def delete_data_revision(self, dataset_id: str, revision_id: str) -> None:
+        with self.connect() as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            role = connection.execute("SELECT role FROM resource_permissions WHERE resource_type='dataset' AND resource_id=? AND principal_id='local'", (dataset_id,)).fetchone()
+            if role is None:
+                raise KeyError(dataset_id)
+            if role['role'] != 'owner':
+                raise PermissionError('只有所有者可以删除版本')
+            revision = connection.execute("SELECT 1 FROM dataset_revisions WHERE id=? AND dataset_id=? AND status='published'", (revision_id, dataset_id)).fetchone()
+            if revision is None:
+                raise KeyError(revision_id)
+            remaining = connection.execute("SELECT MAX(revision_number) FROM dataset_revisions WHERE dataset_id=? AND id<>? AND status='published'", (dataset_id, revision_id)).fetchone()[0]
+            if remaining is None:
+                raise ValueError('至少保留一个版本；如需全部删除，请删除数据集')
+            connection.execute("UPDATE dataset_revisions SET status='archived' WHERE id=?", (revision_id,))
+            connection.execute('UPDATE data_assets SET latest_revision=?,updated_at=? WHERE id=?', (remaining, utc_now(), dataset_id))
 
     def delete_data_asset(self, dataset_id: str) -> None:
         directory = (settings.data_dir / 'assets' / dataset_id).resolve()
@@ -1797,6 +1853,9 @@ class Repository(ReportRepositoryMixin):
         return matches
 
     def _materialize_asset_files(self, connection: sqlite3.Connection) -> None:
+        # Never relocate a live database's files into an overridden test data directory.
+        if self.db_path.parent.resolve() != settings.data_dir.resolve():
+            return
         rows = connection.execute(
             """SELECT rt.id,rt.parquet_path,rt.source_dataset_id,r.dataset_id,r.revision_number
             FROM dataset_revision_tables rt JOIN dataset_revisions r ON r.id=rt.revision_id"""
@@ -1807,7 +1866,11 @@ class Repository(ReportRepositoryMixin):
             target = target_dir / f"{row['source_dataset_id']}.parquet"
             if source.resolve() == target.resolve():
                 continue
-            if source.exists():
+            if not source.exists() and target.is_file():
+                expected = connection.execute('SELECT content_hash FROM dataset_revision_tables WHERE id=?', (row['id'],)).fetchone()[0]
+                if self._content_hash(target) == expected:
+                    connection.execute('UPDATE dataset_revision_tables SET parquet_path=? WHERE id=?', (str(target), row['id']))
+            elif source.exists():
                 target_dir.mkdir(parents=True, exist_ok=True)
                 if not target.exists():
                     shutil.copy2(source, target)

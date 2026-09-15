@@ -292,7 +292,7 @@
 .library-summary strong { font: 600 26px/1 var(--mono); }
 .library-summary span, .library-summary p { color: var(--muted); font-size: 11px; }
 .asset-table { border: 1px solid var(--border); border-radius: 6px; background: #fff; overflow: hidden; }
-.asset-row { min-height: 62px; padding: 8px 13px; border-bottom: 1px solid var(--border); display: grid; grid-template-columns: minmax(280px, 1.5fr) 110px 130px 185px 80px; align-items: center; gap: 12px; font-size: 12px; }
+.asset-row { min-height: 62px; padding: 8px 13px; border-bottom: 1px solid var(--border); display: grid; grid-template-columns: minmax(280px, 1.5fr) 110px 130px 185px 180px; align-items: center; gap: 12px; font-size: 12px; }
 .asset-head { min-height: 38px; background: var(--soft); color: var(--muted); font-size: 10px; font-weight: 600; }
 .asset-name { min-width: 0; padding: 0; border: 0; background: transparent; display: flex; align-items: center; gap: 8px; text-align: left; }
 .asset-name > span { min-width: 0; }
@@ -302,9 +302,12 @@
 .revision-row { min-height: 42px; border-bottom: 1px solid var(--border); display: grid; grid-template-columns: 54px minmax(180px, 1fr) 90px 110px 165px 76px; align-items: center; gap: 12px; font-size: 11px; }
 .revision-row .button { min-height: 28px; padding: 0 8px; font-size: 11px; }
 .revision-row:last-child { border-bottom: 0; }
-.report-version { grid-template-columns: 54px 190px 130px minmax(120px, 1fr) 90px; }
-.report-table .open-button { text-decoration: none; display: grid; place-items: center; }
-@media(max-width:1180px){.dataset-workspace-backdrop{padding:12px}.dataset-workspace{height:calc(100vh - 24px)}.dataset-toolbar{grid-template-columns:200px minmax(220px,1fr) auto}.asset-row{grid-template-columns:minmax(230px,1fr) 90px 110px 150px 70px}}
+.report-version { grid-template-columns: 70px 150px 120px minmax(110px, 1fr) auto; }
+.report-table .open-report { min-width: 118px; white-space: nowrap; flex: 1 1 auto; }
+.report-table .row-actions { justify-content: flex-end; }
+.revision-actions { display: flex; justify-content: flex-end; gap: 7px; flex-wrap: wrap; }
+@media(max-width:1180px){.dataset-workspace-backdrop{padding:12px}.dataset-workspace{height:calc(100vh - 24px)}.dataset-toolbar{grid-template-columns:200px minmax(220px,1fr) auto}.asset-row{grid-template-columns:minmax(220px,1fr) 85px 100px 135px auto}.report-table .open-report{min-width:105px}}
+@media(max-width:900px){.report-table .asset-row{grid-template-columns:minmax(190px,1fr) 70px 90px auto}.report-table .asset-row>span:nth-child(4){display:none}.report-table .asset-head>span:nth-child(4){display:none}.report-table .row-actions{gap:4px}.report-table .open-report{font-size:11px;padding:0 7px;min-width:98px}}
 
 .source-trigger > span {
   min-width: 20px;

@@ -4,7 +4,7 @@ import json
 
 from openpyxl import Workbook
 
-from app.analysis_tools import query_from_spec
+from app.analysis_tools import execute_sql
 from app.config import settings
 from app.ingestion import ingest_file, task_dir
 from app.models import (
@@ -15,8 +15,6 @@ from app.models import (
     EvidencePointer,
     Finding,
     Metric,
-    QueryMeasure,
-    QuerySpec,
     UploadedFile,
 )
 from app.repository import repository
@@ -42,16 +40,11 @@ def main() -> None:
 
     run_id = repository.queue_analysis(task_id, "按月份分析收入趋势")
     repository.mark_execution_running(run_id)
-    result = query_from_spec(
+    result = execute_sql(
         task_id,
         datasets,
-        QuerySpec(
-            dataset_id=dataset.id,
-            dimensions=["月份"],
-            measures=[QueryMeasure(field="收入", aggregation="sum", alias="收入")],
-            order_by="月份",
-            descending=False,
-        ),
+        f'SELECT "月份", SUM("收入") AS "收入" FROM "{dataset.table_name}" '
+        'GROUP BY "月份" ORDER BY "月份" ASC',
         "月度收入",
         run_id,
     )

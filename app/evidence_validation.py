@@ -123,7 +123,7 @@ def _is_numeric_value(value: Any) -> bool:
 
 
 def current_evidence_ids(state: AnalysisState) -> set[str]:
-    return {
+    return set(state.inherited_evidence_ids) | {
         evidence_id
         for result in state.tool_results
         if result.get("status") == "success"

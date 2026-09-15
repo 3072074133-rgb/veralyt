@@ -36,7 +36,8 @@ def test_excel_text_values_are_coerced() -> None:
     assert converted.schema["收入"] == pl.Int64
 
 
-def test_xlsx_imports_visible_data_sheets_and_skips_hidden_sheet(tmp_path: Path) -> None:
+def test_xlsx_imports_visible_data_sheets_and_skips_hidden_sheet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "max_sheets", 30)
     path = tmp_path / "financial-report.xlsx"
     workbook = Workbook()
     first = workbook.active
@@ -88,6 +89,25 @@ def test_xlsx_rejects_more_than_configured_sheet_limit(tmp_path: Path, monkeypat
 
     with pytest.raises(IngestionError, match="检测到 3 个工作表"):
         _read_xlsx(path)
+
+
+@pytest.mark.parametrize("hidden", [False, True])
+def test_workbook_total_rows_boundary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hidden: bool) -> None:
+    path = tmp_path / "total-rows.xlsx"
+    workbook = Workbook()
+    for sheet in (workbook.active, workbook.create_sheet("second")):
+        sheet.append(["name", "value"])
+        sheet.append(["a", 1])
+        sheet.append(["b", 2])
+    if hidden:
+        workbook.worksheets[1].sheet_state = "hidden"
+    workbook.save(path)
+    monkeypatch.setattr(settings, "max_rows_per_workbook", 6)
+    assert _read_xlsx(path).detected_sheet_count == 2
+    monkeypatch.setattr(settings, "max_rows_per_workbook", 5)
+    with pytest.raises(IngestionError, match="总行数超过 5") as error:
+        _read_xlsx(path)
+    assert error.value.http_status == 413
 
 
 def test_xlsx_expands_merged_multi_level_headers(tmp_path: Path) -> None:

@@ -3,12 +3,9 @@ from types import SimpleNamespace
 import pytest
 
 from app.config import settings
-from app.dataset_retrieval import (
-    planner_catalog,
-    query_catalog,
-)
+from app.dataset_retrieval import planner_catalog
 from app.llm import LLMContextOverflowError, LLMStructuredOutputError, OllamaGateway, _select_context
-from app.models import DatasetColumn, DatasetInfo, IntentDecision, QueryRequest
+from app.models import DatasetColumn, DatasetInfo, IntentDecision, PlanDecision
 
 
 def _dataset(dataset_id: str, name: str, columns: list[DatasetColumn]) -> DatasetInfo:
@@ -54,7 +51,31 @@ def test_planner_catalog_preserves_model_choice_across_all_tables() -> None:
 
     compact = planner_catalog([unrelated, total])
     assert [item["dataset_id"] for item in compact] == ["team", "total"]
-    assert compact[1]["fields"][0]["sample_values"]
+    assert compact[1]["table_name"] == "table_total"
+    assert compact[1]["fields"][0] == {"name": "Department", "type": "String"}
+    assert "eligible_fixed_tools" not in compact[1]
+
+
+def test_planner_catalog_never_binds_tools_to_column_names() -> None:
+    receivables = _dataset(
+        "receivables",
+        "应收账款",
+        [
+            DatasetColumn(name="客户名称", display_name="客户名称", data_type="String", null_count=0),
+            DatasetColumn(name="逾期余额", display_name="逾期余额", data_type="Int64", null_count=0),
+            DatasetColumn(name="报表行类型", display_name="报表行类型", data_type="String", null_count=0),
+        ],
+    )
+    expenses = _dataset(
+        "expenses",
+        "费用明细",
+        [DatasetColumn(name="费用项目", display_name="费用项目", data_type="String", null_count=0)],
+    )
+
+    catalog = planner_catalog([expenses, receivables])
+
+    assert all("eligible_fixed_tools" not in item for item in catalog)
+    assert catalog[1]["fields"][0]["name"] == "客户名称"
 
 
 def test_structured_query_rejects_plain_text_instead_of_silent_fallback(
@@ -70,7 +91,7 @@ def test_structured_query_rejects_plain_text_instead_of_silent_fallback(
     monkeypatch.setattr(gateway.client, "chat", lambda **_kwargs: response)
 
     with pytest.raises(LLMStructuredOutputError):
-        gateway.structured('tool_orchestrator', {}, QueryRequest, thinking=False)
+        gateway.structured('analysis_planner', {}, PlanDecision, thinking=False)
 
 
 def test_model_call_is_rejected_before_context_overflow(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -87,7 +108,7 @@ def test_model_call_is_rejected_before_context_overflow(monkeypatch: pytest.Monk
     monkeypatch.setattr(gateway.client, "chat", unexpected_call)
 
     with pytest.raises(LLMContextOverflowError):
-        gateway.structured('tool_orchestrator', {"catalog": "x" * 5000}, QueryRequest, thinking=False)
+        gateway.structured('analysis_planner', {"catalog": "x" * 5000}, PlanDecision, thinking=False)
     assert called is False
 
 
@@ -107,9 +128,9 @@ def test_wide_catalog_preserves_all_fields_in_source_order() -> None:
     ]
     dataset = _dataset("wide", "宽表", columns)
 
-    compact = query_catalog(dataset)
+    compact = planner_catalog([dataset])[0]
 
-    assert [item["name"] for item in compact["columns"]] == [column.name for column in columns]
+    assert [item["name"] for item in compact["fields"]] == [column.name for column in columns]
     assert compact["field_count"] == 32
 
 
@@ -192,5 +213,28 @@ def test_structured_call_sets_context_and_output_limits(monkeypatch: pytest.Monk
     )
 
     assert result.route == "analysis"
-    assert captured["options"]["num_ctx"] == min(settings.model_context_tokens, 4096)
+    assert captured["options"]["num_ctx"] == settings.model_context_tokens
     assert captured["options"]["num_predict"] == settings.model_classifier_output_tokens
+
+
+def test_default_runtime_can_escalate_beyond_base_context(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.model_settings import model_settings
+
+    monkeypatch.setattr(settings, "data_dir", tmp_path)
+    monkeypatch.setattr(settings, "model_context_tokens", 4096)
+    monkeypatch.setattr(settings, "model_max_context_tokens", 8192)
+    model_settings.reset_cache()
+    gateway = OllamaGateway()
+    captured: dict = {}
+
+    def fake_chat(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(message=SimpleNamespace(content=(
+            '{"action":"analyze","goal":"g","clarification":null,'
+            '"clarification_options":[],"steps":[]}'
+        ), tool_calls=[]), prompt_eval_count=3000, eval_count=10, done_reason="stop")
+
+    monkeypatch.setattr(gateway.client, "chat", fake_chat)
+    gateway.structured("analysis_planner", {"catalog": "x" * 12000}, PlanDecision,
+                       thinking=False, prompt_override="Return JSON")
+    assert captured["options"]["num_ctx"] == 8192

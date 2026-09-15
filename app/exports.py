@@ -12,6 +12,7 @@ from jinja2 import Environment, select_autoescape
 from .ingestion import task_dir
 from .models import EvidenceRecord, TaskSnapshot
 from .repository import repository
+from .report_document import evidence_ids, report_sections, report_charts
 
 matplotlib.use("Agg")
 from matplotlib import pyplot as plt  # noqa: E402
@@ -28,15 +29,20 @@ h1{font-size:24px}h2{font-size:16px;border-bottom:1px solid #dce5e8;padding-bott
 .summary{background:#e8f3f5;padding:16px;border-left:4px solid #28778b}.metrics{display:grid;grid-template-columns:repeat(4,1fr);border:1px solid #dce5e8}
 .metric{padding:12px;border-right:1px solid #dce5e8}.metric:last-child{border:0}.metric small{display:block;color:#6b7a80}.metric strong{font-size:20px}
 table{width:100%;border-collapse:collapse;font-size:12px}th,td{padding:8px;border:1px solid #dce5e8;text-align:left}th{background:#f2f6f7}
-img{max-width:100%;height:auto}.muted{color:#6b7a80}@media print{body{margin:12mm}}
+img{max-width:100%;height:auto}.muted{color:#6b7a80}p,li{white-space:pre-wrap;overflow-wrap:anywhere}.table-wrap{overflow:auto}body{padding:0 16px;box-sizing:border-box}@media(max-width:600px){.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}@media print{body{margin:12mm}}
 </style></head><body><h1>{{ title }}</h1><p class="muted">生成时间：{{ updated_at }}</p>
 <div class="summary">{{ summary }}</div>
-{% if metrics %}<h2>关键指标</h2><div class="metrics">{% for m in metrics %}<div class="metric"><small>{{ m.label }}</small><strong>{{ m.value }}</strong>{% if m.change %}<div>{{ m.change }}</div>{% endif %}</div>{% endfor %}</div>{% endif %}
-{% if charts %}<h2>主要图表</h2>{% for chart in charts %}<figure><img src="data:image/png;base64,{{ chart.image }}" alt="{{ chart.title }}"><figcaption>{{ chart.title }}</figcaption></figure>{% endfor %}{% endif %}
-<h2>关键发现</h2><ol>{% for f in findings %}<li><strong>{{ f.title }}</strong><br>{{ f.detail }}</li>{% endfor %}</ol>
+{% for section in sections or [] %}<section><h2>{{ section.title }}</h2>{% for block in section.blocks %}
+{% if block.kind == 'paragraph' %}<p>{{ block.text }}</p>
+{% elif block.kind == 'list' %}<ul>{% for item in block['items'] %}<li>{{ item.text }}{% if item.refs %}<small> [{{ item.refs|join('、') }}]</small>{% endif %}</li>{% endfor %}</ul>
+{% elif block.kind == 'metrics' %}<div class="metrics">{% for m in block.metrics %}<div class="metric"><small>{{ m.label }}</small><strong>{{ m.value }}</strong><div>{{ m.change or '' }}</div><small>{{ m.refs|join('、') }}</small></div>{% endfor %}</div>
+{% elif block.kind == 'table' %}<div class="table-wrap"><table><thead><tr>{% for c in block.columns %}<th>{{ c }}</th>{% endfor %}</tr></thead><tbody>{% for row in block.rows %}<tr>{% for c in block.columns %}<td>{{ row.get(c, '') }}</td>{% endfor %}</tr>{% endfor %}</tbody></table></div>
+{% elif block.kind == 'chart' %}<figure>{% if block.image %}<img src="data:image/png;base64,{{ block.image }}" alt="{{ block.chart.title }}">{% else %}<p>图表无法生成，请查看证据。</p>{% endif %}<figcaption>{{ block.chart.title }}</figcaption></figure>{% endif %}
+{% if block.refs %}<small class="muted">证据：{{ block.refs|join('、') }}</small>{% endif %}{% if block.error %}<p>{{ block.error }}</p>{% endif %}
+{% endfor %}</section>{% endfor %}
 {% if warnings %}<h2>风险提示</h2><ul>{% for w in warnings %}<li>{{ w }}</li>{% endfor %}</ul>{% endif %}
 {% if calculations %}<h2>计算明细</h2><table><thead><tr><th>步骤</th><th>工具</th><th>状态</th><th>结果行数</th><th>证据</th></tr></thead><tbody>{% for item in calculations %}<tr><td>{{ item.title }}</td><td>{{ item.tool_name }}</td><td>{{ item.status }}</td><td>{{ item.row_count }}</td><td>{{ item.evidence_refs|join('、') }}</td></tr>{% endfor %}</tbody></table>{% endif %}
-{% if evidence %}<h2>证据明细</h2><p>{{ evidence.title }}</p><table><thead><tr>{% for c in evidence.columns %}<th>{{ c }}</th>{% endfor %}</tr></thead><tbody>{% for row in evidence.rows[:100] %}<tr>{% for c in evidence.columns %}<td>{{ row.get(c, '') }}</td>{% endfor %}</tr>{% endfor %}</tbody></table>{% endif %}
+{% for item in evidence or [] %}<details><summary>证据明细：{{ item.id }} · {{ item.title }}</summary><div class="table-wrap"><table><thead><tr>{% for c in item.columns %}<th>{{ c }}</th>{% endfor %}</tr></thead><tbody>{% for row in item.rows %}<tr>{% for c in item.columns %}<td>{{ row.get(c, '') }}</td>{% endfor %}</tr>{% endfor %}</tbody></table></div></details>{% endfor %}
 </body></html>""")
 
 
@@ -47,6 +53,7 @@ def export_excel(snapshot: TaskSnapshot) -> Path:
     output.mkdir(parents=True, exist_ok=True)
     path = output / "分析结果.xlsx"
     evidence = _referenced_evidence(snapshot)
+    sections = _reading_sections(snapshot, evidence)
     with xlsxwriter.Workbook(path, {"strings_to_formulas": False, "strings_to_urls": False}) as workbook:
         workbook.set_properties({"title": snapshot.title, "subject": "数据分析结果"})
         header = workbook.add_format({"bold": True, "font_color": "#FFFFFF", "bg_color": "#28778B"})
@@ -54,37 +61,64 @@ def export_excel(snapshot: TaskSnapshot) -> Path:
         normal = workbook.add_format({"font_color": "#243238", "text_wrap": True, "valign": "top"})
         muted = workbook.add_format({"font_color": "#6B7A80", "text_wrap": True})
         summary = workbook.add_worksheet("分析摘要")
-        summary.set_column("A:A", 18)
-        summary.set_column("B:B", 72)
+        summary.set_column("A:A", 24)
+        summary.set_column("B:B", 90)
+        summary.set_column("C:C", 35)
         summary.merge_range("A1:B1", snapshot.result.title, header)
         summary.write("A3", "分析摘要", section)
         summary.write("B3", _excel_text(snapshot.result.summary), normal)
         row = 5
-        summary.write(row, 0, "关键指标", section)
-        summary.write(row, 1, "结果", section)
-        for metric in snapshot.result.metrics:
+        for chapter in sections:
+            summary.write(row, 0, _excel_text(chapter['title']), section)
             row += 1
-            summary.write(row, 0, _excel_text(metric.label), normal)
-            summary.write(row, 1, _excel_text(f"{metric.value} {metric.change or ''}".strip()), normal)
-        row += 2
-        summary.write(row, 0, "关键发现", section)
-        summary.write(row, 1, "说明", section)
-        for finding in snapshot.result.findings:
-            row += 1
-            summary.write(row, 0, _excel_text(finding.title), normal)
-            summary.write(row, 1, _excel_text(finding.detail), normal)
-        if snapshot.result.calculation_details:
-            row += 2
-            summary.write(row, 0, "计算明细", section)
-            summary.write(row, 1, "工具 / 状态 / 行数 / 证据", section)
-            for detail in snapshot.result.calculation_details:
+            for block in chapter['blocks']:
+                entries = []
+                if block['kind'] == 'paragraph':
+                    entries = [('', block['text'], block['refs'])]
+                elif block['kind'] == 'list':
+                    entries = [('', item['text'], item['refs']) for item in block['items']]
+                elif block['kind'] == 'metrics':
+                    entries = [(item['label'], f"{item['value']} {item.get('change') or ''}", item['refs'])
+                               for item in block['metrics']]
+                elif block['kind'] == 'table':
+                    summary.write_row(row, 0, [_excel_text(c) for c in block['columns']], section)
+                    row += 1
+                    for values in block['rows']:
+                        summary.write_row(row, 0, [_excel_value(values.get(c)) for c in block['columns']], normal)
+                        row += 1
+                    entries = [('证据', ', '.join(block['refs']), [])]
+                elif block['kind'] == 'chart':
+                    summary.write(row, 0, _excel_text(block['chart']['title']), normal)
+                    if block.get('image'):
+                        summary.insert_image(row + 1, 0, 'chart.png', {'image_data': io.BytesIO(base64.b64decode(block['image'])),
+                                                                    'x_scale': 0.6, 'y_scale': 0.6})
+                        row += 22
+                    entries = [('图表证据', ', '.join(block['refs']), [])]
+                if block.get('error'):
+                    entries.append(('', block['error'], []))
+                for label, text, refs in entries:
+                    summary.write(row, 0, _excel_text(label), normal)
+                    # Excel limits each cell to 32,767 characters; preserve long prose across rows.
+                    chunks = [text[start:start + 30000] for start in range(0, len(text), 30000)] or ['']
+                    for chunk in chunks:
+                        summary.write(row, 1, _excel_text(chunk), normal)
+                        summary.write(row, 2, ', '.join(refs), muted)
+                        summary.set_row(row, min(409, max(30, (len(chunk) // 65 + chunk.count('\n') + 1) * 17)))
+                        row += 1
                 row += 1
-                summary.write(row, 0, _excel_text(detail.title), normal)
+            row += 1
+        if snapshot.result.calculation_details:
+            calculations = workbook.add_worksheet("计算明细")
+            calculations.set_column('A:C', 45)
+            calculations.write_row(0, 0, ['步骤', '工具 / 状态 / 行数 / 证据', 'SQL'], section)
+            for detail_row, detail in enumerate(snapshot.result.calculation_details, 1):
+                calculations.write(detail_row, 0, _excel_text(detail.title), normal)
                 description = (
                     f"{detail.tool_name} / {detail.status} / {detail.row_count} 行 / "
                     f"{', '.join(detail.evidence_refs) or '无证据'}"
                 )
-                summary.write(row, 1, _excel_text(description), normal)
+                calculations.write(detail_row, 1, _excel_text(description), normal)
+                calculations.write(detail_row, 2, _excel_text(detail.query), normal)
         row += 2
         summary.write(row, 0, "口径与风险", section)
         for note in [*snapshot.result.assumptions, *snapshot.result.warnings]:
@@ -123,7 +157,8 @@ def export_html(snapshot: TaskSnapshot) -> Path:
             updated_at=snapshot.updated_at, metrics=snapshot.result.metrics,
             findings=snapshot.result.findings,
             warnings=[*snapshot.result.assumptions, *snapshot.result.warnings],
-            evidence=evidence[0] if evidence else None,
+            evidence=evidence,
+            sections=_reading_sections(snapshot, evidence),
             charts=_render_charts(snapshot, evidence),
             calculations=snapshot.result.calculation_details,
         ),
@@ -136,7 +171,7 @@ def _render_charts(snapshot: TaskSnapshot, evidence: list[EvidenceRecord]) -> li
     if snapshot.result is None:
         return []
     rendered: list[dict[str, str]] = []
-    for spec in snapshot.result.charts:
+    for spec in report_charts(snapshot.result):
         image = _render_chart(spec, evidence)
         if image:
             rendered.append({"title": spec.title, "image": image})
@@ -227,17 +262,31 @@ def _sheet_name(name: str) -> str:
 def _referenced_evidence(snapshot: TaskSnapshot) -> list[EvidenceRecord]:
     if snapshot.result is None:
         return []
-    referenced = {
-        evidence_id
-        for item in [*snapshot.result.metrics, *snapshot.result.findings]
-        for evidence_id in item.evidence_refs
-    }
-    referenced.update(snapshot.result.summary_evidence_refs)
-    referenced.update(chart.dataset_ref for chart in snapshot.result.charts)
-    lineage = repository.run_lineage_ids(snapshot.id, snapshot.active_run_id) if snapshot.active_run_id else set()
+    referenced = evidence_ids(snapshot.result)
     return [
         item for item in repository.list_evidence(snapshot.id)
         if item.id in referenced
-        and (item.run_id is None or item.run_id in lineage)
-        and item.data_revision == snapshot.data_revision
     ]
+
+
+def _reading_sections(snapshot: TaskSnapshot, evidence: list[EvidenceRecord]) -> list[dict]:
+    if snapshot.result is None:
+        return []
+    lookup = {item.id: item for item in evidence}
+    sections = []
+    for chapter in report_sections(snapshot.result):
+        payload = chapter.model_dump(mode='json')
+        for block, source in zip(payload['blocks'], chapter.blocks, strict=True):
+            block['refs'] = sorted(evidence_ids(source))
+            for item in [*block['items'], *block['metrics']]:
+                item['refs'] = sorted(evidence_ids(item))
+            if source.kind == 'table':
+                data = lookup.get(source.dataset_ref)
+                block['columns'] = source.columns or (data.columns if data else [])
+                block['rows'] = data.rows if data else []
+                if data is None:
+                    block['error'] = '引用的数据证据不可用。'
+            if source.chart:
+                block['image'] = _render_chart(source.chart, evidence)
+        sections.append(payload)
+    return sections

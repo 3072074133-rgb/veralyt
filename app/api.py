@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import time
 import uuid
 from pathlib import Path
 
@@ -23,6 +24,9 @@ from .models import (
     DatasetProfile,
     EvidenceRecord,
     MessageRequest,
+    ModelConnectionResult,
+    ModelSettingsEnvelope,
+    ModelSettingsRequest,
     ReportDetail,
     ReportJob,
     ReportSummary,
@@ -38,16 +42,62 @@ from .models import (
     WorkflowRun,
 )
 from .repository import repository
+from .llm import LLMError, llm
+from .model_settings import model_settings
 from .worker import worker
+from .report_document import evidence_ids as report_evidence_ids
 
 
 router = APIRouter(prefix=settings.api_prefix)
+
+
+@router.get("/settings", response_model=ModelSettingsEnvelope)
+async def get_model_settings() -> ModelSettingsEnvelope:
+    return ModelSettingsEnvelope(llm=model_settings.public())
+
+
+@router.put("/settings", response_model=ModelSettingsEnvelope)
+async def update_model_settings(payload: ModelSettingsRequest) -> ModelSettingsEnvelope:
+    try:
+        configured = model_settings.update(payload.llm)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return ModelSettingsEnvelope(llm=configured)
+
+
+@router.post("/settings/test", response_model=ModelConnectionResult)
+async def test_model_connection(payload: ModelSettingsRequest) -> ModelConnectionResult:
+    try:
+        configured = model_settings.resolve_for_test(payload.llm)
+        started_at = time.perf_counter()
+        message = await asyncio.to_thread(llm.test_connection, configured)
+        elapsed = round((time.perf_counter() - started_at) * 1000)
+        return ModelConnectionResult(
+            success=True,
+            provider=configured.provider,
+            model=configured.model,
+            message=message,
+            latency_ms=elapsed,
+        )
+    except (ValueError, LLMError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/tasks", response_model=CreateTaskResponse, status_code=status.HTTP_201_CREATED)
 async def create_task() -> CreateTaskResponse:
     task_id = repository.create_task()
     return CreateTaskResponse(id=task_id, status=TaskStatus.READY)
+
+
+@router.delete("/tasks/{task_id}/files/{file_id}", response_model=TaskSnapshot)
+async def remove_task_file(task_id: str, file_id: str) -> TaskSnapshot:
+    try:
+        repository.remove_task_file(task_id, file_id)
+    except KeyError as exc:
+        raise HTTPException(404, "文件不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return _snapshot(task_id)
 
 
 @router.post("/tasks/{task_id}/files", response_model=UploadBatchResponse)
@@ -164,6 +214,20 @@ async def get_task(task_id: str) -> TaskSnapshot:
     return _snapshot(task_id)
 
 
+@router.post('/tasks/{task_id}/runs/{run_id}/retry', response_model=TaskSnapshot,
+             status_code=status.HTTP_202_ACCEPTED)
+async def retry_analysis(task_id: str, run_id: str) -> TaskSnapshot:
+    _snapshot(task_id)
+    try:
+        queued = repository.queue_analysis(task_id, '', retry_run_id=run_id)
+    except KeyError as exc:
+        raise HTTPException(404, '分析轮次不存在') from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    await worker.enqueue_run(queued)
+    return _snapshot(task_id)
+
+
 @router.get("/tasks/{task_id}/relationships", response_model=list[DatasetRelationship])
 async def get_task_relationships(task_id: str) -> list[DatasetRelationship]:
     snapshot = _snapshot(task_id)
@@ -272,14 +336,27 @@ async def delete_dataset(dataset_id: str) -> Response:
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@router.delete("/datasets/{dataset_id}/revisions/{revision_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_dataset_revision(dataset_id: str, revision_id: str) -> Response:
+    try:
+        repository.delete_data_revision(dataset_id, revision_id)
+    except KeyError as exc:
+        raise HTTPException(404, '版本不存在') from exc
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.post(
     "/datasets/{dataset_id}/revisions/{revision_id}/tasks",
     response_model=CreateTaskResponse,
     status_code=status.HTTP_201_CREATED,
 )
-async def analyze_dataset_revision(dataset_id: str, revision_id: str) -> CreateTaskResponse:
+async def analyze_dataset_revision(dataset_id: str, revision_id: str, editing: bool = Query(default=False)) -> CreateTaskResponse:
     try:
-        task_id = await asyncio.to_thread(create_task_from_revision, dataset_id, revision_id)
+        task_id = await asyncio.to_thread(create_task_from_revision, dataset_id, revision_id, is_editor=editing)
     except KeyError as exc:
         raise HTTPException(404, "数据集版本不存在") from exc
     except ValueError as exc:
@@ -372,13 +449,9 @@ async def get_evidence(task_id: str, evidence_id: str) -> EvidenceRecord:
     evidence = repository.get_evidence(task_id, evidence_id)
     if evidence is None:
         raise HTTPException(404, "证据不存在")
-    lineage = repository.run_lineage_ids(task_id, snapshot.active_run_id) if snapshot.active_run_id else set()
-    if (
-        evidence.data_revision != snapshot.data_revision
-        or snapshot.active_run_id is None
-        or (evidence.run_id is not None and evidence.run_id not in lineage)
-    ):
-        raise HTTPException(409, "该证据不属于当前数据版本的活动分析结果")
+    referenced = report_evidence_ids(snapshot.result) if snapshot.result else set()
+    if snapshot.active_run_id is None or evidence_id not in referenced:
+        raise HTTPException(409, "该证据未被当前活动报告引用")
     return evidence
 
 
@@ -464,6 +537,19 @@ async def download_report_version(report_id: str, version_id: str) -> FileRespon
         filename=f"{_download_name(report.title)}-v{version.version_number}.html",
         media_type="text/html",
     )
+
+
+@router.get("/reports/{report_id}/versions/{version_id}/preview")
+async def preview_report_version(report_id: str, version_id: str) -> FileResponse:
+    """Serve the immutable published snapshot without opening its source task."""
+    try:
+        report = repository.get_report(report_id)
+    except KeyError as exc:
+        raise HTTPException(404, "报告不存在") from exc
+    version = next((item for item in report.versions if item.id == version_id), None)
+    if version is None or not version.html_path or not Path(version.html_path).is_file():
+        raise HTTPException(404, "报告版本文件不存在")
+    return FileResponse(version.html_path, media_type="text/html")
 
 
 @router.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)

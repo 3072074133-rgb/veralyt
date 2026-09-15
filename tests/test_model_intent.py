@@ -43,7 +43,7 @@ def test_conversation_does_not_query(imported_report, monkeypatch):
     monkeypatch.setattr(llm, 'structured', lambda *a, **k: IntentDecision(route='conversation', reply='你好！'))
     def no_query(*a, **k):
         pytest.fail('conversation must not query')
-    monkeypatch.setattr('app.workflow.query_financial_report', no_query)
+    monkeypatch.setattr('app.workflow.execute_sql', no_query)
     output = build_graph().invoke(AnalysisState(task_id=task, run_id=run, user_question='你好',
         datasets=[d.model_dump() for d in datasets]), config={'configurable': {'thread_id': run}})
     assert output['final_status'] == 'off_topic'
@@ -128,9 +128,9 @@ def test_confirmed_financial_clarification_preserves_model_plan(imported_report,
     monkeypatch.setattr(llm, 'structured', lambda *a, **k: PlanDecision(
         action='analyze', goal='按已确认口径执行六表交叉验证', clarification=None,
         clarification_options=[], steps=[
-            PlanStep(id='model_query', purpose='跨表核对', tool='query_data',
-                     dataset_id=datasets[0].id,
-                     dataset_ids=[item.id for item in datasets[1:3]])
+            PlanStep(id='model_query', purpose='跨表核对',
+                     dataset_ids=[item.id for item in datasets[:3]],
+                     sql=f'SELECT * FROM "{datasets[0].table_name}"')
         ]))
     output = workflow.plan_node(AnalysisState(
         task_id=task, run_id=run,
@@ -143,10 +143,13 @@ def test_confirmed_financial_clarification_preserves_model_plan(imported_report,
     assert plan['can_execute'] is True
     assert plan['clarification_question'] is None
     assert [step['id'] for step in plan['steps']] == ['model_query']
-    assert plan['steps'][0]['dataset_ids'] == [datasets[1].id, datasets[2].id]
+    assert plan['steps'][0]['dataset_ids'] == [item.id for item in datasets[:3]]
 
 
 def test_complete_repair_context_reports_overflow(monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings, 'model_context_tokens', 4096)
+    monkeypatch.setattr(settings, 'model_max_context_tokens', 4096)
     from app.llm import LLMContextOverflowError
     calls = []
     def chat(**kwargs):

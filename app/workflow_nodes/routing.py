@@ -7,8 +7,8 @@ def route_intent(state: AnalysisState) -> str:
     # Only explicit report analysis/calculation enters the strict workflow.
     # Explanations, recommendations, clarifications and ordinary chat end
     # after the intent node with the model's user-facing reply.
-    route = IntentDecision.model_validate(state.intent).route
-    return "plan" if route == "analysis" else "off_topic"
+    decision = IntentDecision.model_validate(state.intent)
+    return "plan" if decision.delivery == 'report' or decision.data_action == 'query' or decision.route == 'analysis' else "off_topic"
 
 def route_plan(state: AnalysisState) -> str:
     plan = AnalysisPlan.model_validate(state.plan)
@@ -22,19 +22,16 @@ def route_execute(state: AnalysisState) -> str:
 
 def route_reflection(state: AnalysisState) -> str:
     decision = ReflectionDecision.model_validate(state.reflection)
+    if decision.verdict == "pass":
+        return "finish"
+    if decision.route == "ask_user":
+        return "ask_user"
     if state.revision_round > settings.max_revision_rounds:
         return "finish"
     return decision.route
 
 
 def route_validation(state: AnalysisState) -> str:
-    """Send revised drafts back to the model reviewer until accepted or capped."""
-    validation = state.validation or {}
-    if validation.get("passed", False) and (not state.reflection or state.reflection.get("verdict") == "pass"):
-        return "finish"
-    if validation.get("passed", False):
-        return "reflect"
-    if state.revision_round < settings.max_revision_rounds:
-        return "reflect"
-    return "finish"
+    """Legacy checkpoints also require an explicit model decision."""
+    return "reflect"
 

@@ -20,7 +20,7 @@ export function prepareChartRows(spec: ChartSpec, evidence?: EvidenceRecord): Ch
 export function buildChartOption(spec: ChartSpec, evidence?: EvidenceRecord, compact = false): Record<string, unknown> {
   const rows = prepareChartRows(spec, evidence)
   const categories = rows.map((row) => String(row[spec.category_field] ?? ''))
-  const palette = ['#28778b', '#4f9368', '#c58a2f', '#b64c46', '#657d91', '#8b6b9f']
+  const palette = ['#3778cf', '#199b8e', '#e6a23c', '#9471c2', '#df7184', '#56a6bd', '#8aa64b', '#d58147']
   const isPie = spec.chart_type === 'pie'
   const isScatter = spec.chart_type === 'scatter'
   const isHorizontal = !isPie && spec.orientation === 'horizontal'
@@ -53,7 +53,7 @@ export function buildChartOption(spec: ChartSpec, evidence?: EvidenceRecord, com
         stack: 'waterfall',
         barMaxWidth: 34,
         data: values,
-        itemStyle: { color: (item: { value: number }) => item.value >= 0 ? '#27805c' : '#b64c46', borderRadius: [3, 3, 0, 0] },
+        itemStyle: { color: (item: { value: number }) => item.value >= 0 ? '#199b8e' : '#df7184', borderRadius: [3, 3, 0, 0] },
         label: valueLabel(values.length, 'top', unit),
       },
     ]
@@ -68,7 +68,7 @@ export function buildChartOption(spec: ChartSpec, evidence?: EvidenceRecord, com
           center: categories.length > 7 ? ['38%', '48%'] : ['50%', '48%'],
           minAngle: 3,
           avoidLabelOverlap: true,
-          itemStyle: { color: palette[index % palette.length], borderColor: '#fff', borderWidth: 2, borderRadius: 3 },
+          itemStyle: { borderColor: '#fff', borderWidth: 2, borderRadius: 3 },
           label: categories.length > 7 ? { show: false } : { show: true, formatter: '{b}\n{d}%', color: '#4e5f66', fontSize: 10, lineHeight: 15 },
           labelLine: { show: categories.length <= 7, length: 9, length2: 10, smooth: true },
           emphasis: { scale: true, scaleSize: 5 },
@@ -84,7 +84,12 @@ export function buildChartOption(spec: ChartSpec, evidence?: EvidenceRecord, com
         showSymbol: type === 'line' ? categories.length <= 24 : undefined,
         symbolSize: type === 'line' ? 6 : undefined,
         barMaxWidth: isHorizontal ? 24 : 34,
-        itemStyle: { color: palette[index % palette.length], borderRadius: isHorizontal ? [0, 3, 3, 0] : [3, 3, 0, 0] },
+        itemStyle: {
+          color: type === 'bar' && spec.series.length === 1
+            ? (item: { dataIndex: number }) => palette[item.dataIndex % palette.length]
+            : palette[index % palette.length],
+          borderRadius: isHorizontal ? [0, 3, 3, 0] : [3, 3, 0, 0],
+        },
         lineStyle: { width: 2, color: palette[index % palette.length] },
         areaStyle: type === 'line' && spec.series.length === 1 ? { color: palette[index % palette.length], opacity: .08 } : undefined,
         label: spec.series.length === 1 ? valueLabel(values.length, isHorizontal ? 'right' : 'top', unit) : { show: false },

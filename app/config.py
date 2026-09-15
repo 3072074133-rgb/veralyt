@@ -18,9 +18,10 @@ class Settings(BaseSettings):
     data_dir: Path = PROJECT_ROOT / "data"
     ollama_host: str = "http://127.0.0.1:11434"
     ollama_model: str = "qwen3.5:4b"
-    max_file_size: int = 100 * 1024 * 1024
+    max_file_size: int = 30 * 1024 * 1024
     max_files: int = 5
-    max_sheets: int = 30
+    max_sheets: int = 15
+    max_rows_per_workbook: int = 300_000
     max_xlsx_uncompressed_size: int = 1024 * 1024 * 1024
     max_xlsx_compression_ratio: int = 100
     max_rows_per_sheet: int = 500_000
@@ -35,8 +36,8 @@ class Settings(BaseSettings):
     max_tool_calls: int = 10
     max_revision_rounds: int = 3
     query_timeout_seconds: int = 30
-    model_context_tokens: int = 16384
-    model_max_context_tokens: int = 32768
+    model_context_tokens: int = 32768
+    model_max_context_tokens: int = 49152
     model_classifier_output_tokens: int = 512
     model_default_output_tokens: int = 1536
     model_draft_output_tokens: int = 3072

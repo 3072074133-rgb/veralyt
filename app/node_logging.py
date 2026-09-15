@@ -17,9 +17,9 @@ logger = logging.getLogger(__name__)
 NODE_PROMPTS = {
     "classify": "intent_classifier",
     "plan": "analysis_planner",
-    "execute": "tool_orchestrator",
     "draft": "draft_writer",
-    "reflect": "reflection_reviewer",
+    "reflect": "final_reviewer",
+    "assess_results": "result_reviewer",
 }
 
 
@@ -46,6 +46,14 @@ class NodeTracker:
     diagnostics: dict[str, Any] = field(default_factory=dict)
 
     def record_diagnostics(self, diagnostics: dict[str, Any]) -> None:
+        if 'stream_text' in diagnostics:
+            from .repository import repository
+            from .models import TaskStatus
+            repository.add_event(
+                self.task_id, 'model.text', TaskStatus.PLANNING, 0, '',
+                {'run_id': self.run_id, 'text': diagnostics['stream_text']},
+            )
+            return
         if diagnostics.get('progress_message'):
             from .repository import repository
             message = diagnostics['progress_message']
@@ -100,7 +108,8 @@ class NodeTracker:
 def start_node(state: Any, node_name: str) -> NodeTracker:
     # Prompt files are loaded lazily by the LLM gateway.  Deterministic nodes
     # should not perform prompt I/O merely to record timing.
-    prompt = _LazyPrompt(NODE_PROMPTS[node_name])
+    prompt_name = NODE_PROMPTS.get(node_name)
+    prompt = _LazyPrompt(prompt_name) if prompt_name else None
     started_at = time.perf_counter()
     log_event(
         logger,

@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from .api import router
 from .config import PROJECT_ROOT, settings
 from .observability import bind_log_context, configure_logging, duration_ms, log_event
+from .model_settings import model_settings
 from .repository import repository
 from .worker import worker
 
@@ -61,7 +62,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://127.0.0.1:5173", "http://localhost:5173", f"http://127.0.0.1:{settings.port}"],
     allow_credentials=False,
-    allow_methods=["GET", "POST", "DELETE"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
 )
 app.include_router(router)
@@ -69,9 +70,11 @@ app.include_router(router)
 
 @app.get("/api/health")
 async def health() -> dict[str, str]:
+    model = model_settings.get()
     return {
         "status": "ok",
-        "model": settings.ollama_model,
+        "provider": model.provider,
+        "model": model.model,
     }
 
 

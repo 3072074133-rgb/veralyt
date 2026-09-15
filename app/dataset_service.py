@@ -239,7 +239,7 @@ def correct_dataset(
     )
 
 
-def create_task_from_revision(dataset_id: str, revision_id: str) -> str:
+def create_task_from_revision(dataset_id: str, revision_id: str, *, is_editor: bool = False) -> str:
     asset = dataset_repository.get_data_asset(dataset_id)
     revision = next((item for item in asset.revisions if item.id == revision_id), None)
     if revision is None:
@@ -247,7 +247,7 @@ def create_task_from_revision(dataset_id: str, revision_id: str) -> str:
     records = dataset_repository.revision_table_records(dataset_id, revision_id)
     if not records:
         raise ValueError("数据版本不包含可分析的数据表")
-    task_id = repository.create_task()
+    task_id = repository.create_task(is_editor=is_editor)
     directory = task_dir(task_id)
     work_dir = directory / "work"
     work_dir.mkdir(exist_ok=True)

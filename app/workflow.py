@@ -10,34 +10,30 @@ from typing import Any
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 
-from .analysis_tools import ToolError, profile_table, query_department_profit, query_from_spec
+from .analysis_tools import ToolError, execute_sql
 from .config import settings
 from .context_manager import context_manager
-from .dataset_retrieval import (
-    planner_catalog,
-    query_catalog,
-)
+from .dataset_retrieval import planner_catalog
 from .evidence_validation import (
     current_evidence_ids as _current_evidence_ids,
     validate_claim as _validate_claim,
 )
 from .llm import LLMContextOverflowError, LLMError, LLMUnavailableError, llm
 from .report_generation import compact_evidence, generate_report, resolve_citations
-from .financial_reports import query_financial_report
-from .receivables import query_overdue
-from .tool_catalog import TOOL_DESCRIPTIONS
+from .report_document import report_charts
+from .review_generation import generate_review
+from .models import ReflectionDecision as ReflectionDecision
 from .models import (
     AnalysisDraft,
     AnalysisPlan, PlanDecision,
     AnalysisState,
     DatasetInfo,
-    GeneratedAnalysisDraft,
+    ChapterAnalysisDraft,
     CalculationDetail,
     DeliveryCheck,
     DeliveryGate,
-    QuerySpec,
-    QueryDecision,
-    ReflectionDecision,
+    ResultDecision,
+    ConvergenceDecision,
     Severity,
     TaskStatus,
     ValidationIssue,
@@ -62,9 +58,7 @@ logger = logging.getLogger(__name__)
 
 class AnalysisCancelled(Exception):
     """Raised at workflow node boundaries after a user cancellation."""
-__all__ = [
-    "_validate_claim",
-]
+__all__ = ["_validate_claim"]
 
 
 def classify_node(state: AnalysisState) -> dict[str, Any]:
@@ -115,7 +109,7 @@ def plan_node(state: AnalysisState) -> dict[str, Any]:
             )
         datasets = [DatasetInfo.model_validate(item) for item in state.datasets]
         catalog_datasets = datasets
-        compact_catalog = planner_catalog(catalog_datasets)
+        compact_catalog = planner_catalog(catalog_datasets, state.task_id)
         tracker.record_diagnostics({
             "dataset_count": len(datasets),
             "candidate_count": len(catalog_datasets),
@@ -127,16 +121,19 @@ def plan_node(state: AnalysisState) -> dict[str, Any]:
         plan_context = {
                 "user_question": planning_question,
                 "clarification_answer": state.clarification_answer,
+                "result_decision": state.result_decision,
+                "remaining_tool_calls": settings.max_tool_calls - state.tool_call_count,
+                "dataset_catalog": compact_catalog,
                 "conversation_context": state.conversation_summary or {},
                 "intent_decision": state.intent or {},
                 "previous_result": state.previous_result or {},
-                "dataset_catalog": compact_catalog,
+                "evidence_catalog": _evidence_catalog(state),
+                "data_revision": state.data_revision,
                 "confirmed_policies": {},
                 "confirmed_relationships": state.confirmed_relationships,
-                "available_tools": [tool["name"] for tool in TOOL_DESCRIPTIONS],
-                "tool_descriptions": TOOL_DESCRIPTIONS,
                 "current_plan": state.plan,
                 "completed_step_ids": state.completed_step_ids,
+                "query_failures": state.query_failures,
                 "revision_feedback": _revision_feedback(state),
                 "last_clarification": _last_clarification(state),
         }
@@ -163,7 +160,7 @@ def plan_node(state: AnalysisState) -> dict[str, Any]:
                 for item in catalog_datasets
             ],
         }
-        if state.reflection and state.reflection.get("route") == "replan":
+        if (state.reflection and state.reflection.get("route") == "replan") or state.result_decision:
             update["completed_step_ids"] = []
         return tracker.complete(update)
     except Exception as exc:
@@ -194,7 +191,6 @@ def execute_node(state: AnalysisState) -> dict[str, Any]:
     )
     tracker = start_node(state, "execute")
     try:
-        analysis_question = state.analysis_question or state.user_question
         datasets = [DatasetInfo.model_validate(item) for item in state.datasets]
         plan = AnalysisPlan.model_validate(state.plan)
         pending_step = next(
@@ -207,93 +203,60 @@ def execute_node(state: AnalysisState) -> dict[str, Any]:
             raise ToolError(
                 f"工具调用已达到上限 {settings.max_tool_calls}，仍有计划步骤未完成：{pending_step.purpose}"
             )
-        selected_ids = list(dict.fromkeys([
-            *([pending_step.dataset_id] if pending_step.dataset_id else []),
-            *pending_step.dataset_ids,
-        ]))
-        if not selected_ids:
-            raise ToolError(f"计划步骤“{pending_step.purpose}”未指定数据表")
-        name = pending_step.tool
+        selected_ids = list(dict.fromkeys(pending_step.dataset_ids))
         unknown_ids = [item for item in selected_ids if item not in {dataset.id for dataset in datasets}]
         if unknown_ids:
             raise ToolError(f"计划引用了不存在的数据表：{', '.join(unknown_ids)}")
         dataset_by_id = {item.id: item for item in datasets}
         selected_datasets = [dataset_by_id[item] for item in selected_ids]
-        selected = selected_datasets[0]
-        arguments: dict[str, Any] = {"dataset_id": selected.id}
+        arguments: dict[str, Any] = {
+            "dataset_ids": selected_ids,
+            "sql": pending_step.sql,
+        }
         tracker.record_diagnostics({
-            "selected_dataset_id": selected.id,
-            "selected_dataset_name": selected.display_name,
-            "planned_tool": name,
+            "selected_dataset_ids": selected_ids,
+            "selected_table_names": [item.table_name for item in selected_datasets],
+            "planned_tool": "execute_sql",
         })
-        if name == "query_data":
-            query_context = {
-                "user_question": analysis_question,
-                "clarification_answer": state.clarification_answer,
-                "analysis_plan": state.plan,
-                "current_step": pending_step.model_dump(mode="json"),
-                "selected_dataset": query_catalog(selected),
-                "related_datasets": [query_catalog(item) for item in selected_datasets if item.id != selected.id],
-                "confirmed_relationships": state.confirmed_relationships,
-                "available_results": state.tool_results,
-                "latest_validation_failure": state.validation,
-                "previous_query_failures": state.query_failures,
-                "query_repair_instruction": (
-                    "根据 previous_query_failures 修正无法执行的参数，保留分析目的。"
-                    "若历史中出现相同参数和相同报错，说明之前的修正没有解决问题，不要再次原样提交。"
-                    "关联策略由你决定，无须关系预先确认；系统不会替换字段或连接方式。"
-                ),
-            }
-            decision = llm.structured(
-                "tool_orchestrator",
-                query_context,
-                QueryDecision,
-                thinking=False,
-                prompt_override=tracker.prompt.content,
-                diagnostics=tracker.record_diagnostics,
-            )
-            arguments = {
-                "query": {**decision.model_dump(mode="json"), "dataset_id": selected.id},
-                "title": pending_step.purpose,
-            }
         try:
-            if name == "query_overdue":
-                result = query_overdue(state.task_id, selected, state.run_id)
-            elif name == "query_financial_report":
-                result = query_financial_report(state.task_id, selected_datasets, state.run_id)
-            elif name == "profile_table":
-                result = profile_table(state.task_id, selected, state.run_id)
-            elif name == "query_department_profit":
-                result = query_department_profit(state.task_id, selected, state.run_id)
-            elif name == "query_data":
-                result = query_from_spec(
-                    state.task_id,
-                    datasets,
-                    _query_spec_from_arguments(arguments),
-                    arguments.get("title", pending_step.purpose),
-                    state.run_id,
-                )
-            else:
-                raise ToolError(f"不支持的分析工具：{name}")
+            result = execute_sql(
+                state.task_id,
+                selected_datasets,
+                pending_step.sql,
+                pending_step.purpose,
+                state.run_id,
+            )
         except Exception as exc:
             repository.add_artifact(
                 state.task_id, state.run_id, "error", f"{pending_step.purpose}失败",
-                {"tool_name": name, "error": str(exc), "arguments": arguments},
+                {"tool_name": "execute_sql", "error": str(exc), "arguments": arguments},
                 status="failed",
             )
-            if (name == "query_data" and isinstance(exc, ToolError)
-                    and len(state.query_failures) < 2
+            if (isinstance(exc, ToolError) and len(state.query_failures) < 2
                     and state.tool_call_count + 1 < settings.max_tool_calls):
                 return tracker.complete({
                     "query_failures": [*state.query_failures, {
-                        "arguments": arguments, "error": str(exc),
+                        "step_id": pending_step.id,
+                        "purpose": pending_step.purpose,
+                        "arguments": arguments,
+                        "error": str(exc),
                     }],
                     "tool_call_count": state.tool_call_count + 1,
                 })
+            if isinstance(exc, ToolError):
+                return tracker.complete({
+                    'tool_results': [*state.tool_results, {
+                        'result_id': f'failed_{pending_step.id}', 'tool_name': 'execute_sql',
+                        'arguments': arguments, 'status': 'error', 'rows': [], 'evidence_ids': [],
+                        'summary': f'未完成：{pending_step.purpose}', 'error': str(exc),
+                        'warnings': [f'以下分析未完成，不得据此宣称核对通过：{pending_step.purpose}'],
+                    }],
+                    'completed_step_ids': list(dict.fromkeys([*state.completed_step_ids, pending_step.id])),
+                    'tool_call_count': state.tool_call_count + 1, 'query_failures': [],
+                })
             raise ToolError(f"计划步骤“{pending_step.purpose}”执行失败：{exc}") from exc
-        artifact_type = "query" if name == "query_data" else "table"
         repository.add_artifact(
-            state.task_id, state.run_id, artifact_type, pending_step.purpose,
+            state.task_id, state.run_id, "query", pending_step.purpose,
             {
                 "tool_name": result.tool_name,
                 "summary": result.summary,
@@ -301,6 +264,7 @@ def execute_node(state: AnalysisState) -> dict[str, Any]:
                 "arguments": result.arguments,
                 "columns": list(result.rows[0]) if result.rows else [],
                 "warnings": result.warnings,
+                "execution_metadata": result.execution_metadata,
             },
             result.evidence_ids,
         )
@@ -334,7 +298,7 @@ def draft_node(state: AnalysisState) -> dict[str, Any]:
         generated_draft = generate_report(llm,
             "draft_writer",
             draft_context,
-            GeneratedAnalysisDraft,
+            ChapterAnalysisDraft,
             thinking=False,
             prompt_override=tracker.prompt.content,
             ignored_response_fields={"calculation_details"},
@@ -386,10 +350,21 @@ def validate_node(state: AnalysisState) -> dict[str, Any]:
             insight.evidence_refs,
             insight.evidence_pointers,
         ))
+    for section_index, section in enumerate(draft.sections):
+        for block_index, block in enumerate(section.blocks):
+            target = f"sections[{section_index}].blocks[{block_index}]"
+            referenced.update(block.evidence_refs)
+            issues.extend(_validate_claim(state, target, block.evidence_refs, block.evidence_pointers))
+            for item_index, item in enumerate(block.items):
+                referenced.update(item.evidence_refs)
+                issues.extend(_validate_claim(state, f"{target}.items[{item_index}]", item.evidence_refs, item.evidence_pointers))
+            for metric_index, metric in enumerate(block.metrics):
+                referenced.update(metric.evidence_refs)
+                issues.extend(_validate_claim(state, f"{target}.metrics[{metric_index}]", metric.evidence_refs, metric.evidence_pointers))
     missing = referenced - available
     if missing:
         issues.append(ValidationIssue(code="unknown_evidence", message=f"引用了不存在的证据：{', '.join(sorted(missing))}", severity=Severity.ERROR))
-    for chart in draft.charts:
+    for chart in report_charts(draft):
         evidence = repository.get_evidence(state.task_id, chart.dataset_ref)
         if chart.dataset_ref not in available or evidence is None:
             issues.append(ValidationIssue(code="unknown_chart_data", message=f"图表 {chart.title} 的数据证据不存在", severity=Severity.ERROR, target=chart.id))
@@ -427,18 +402,18 @@ def reflect_node(state: AnalysisState) -> dict[str, Any]:
     repository.update_task(state.task_id, status=TaskStatus.REFLECTING, progress=88, status_message=f"正在进行第 {revision_round} 轮质量复核")
     tracker = start_node(state, "reflect")
     try:
-        ValidationReport.model_validate(state.validation)
         reflection_context = _reflection_context(state, revision_round)
-        decision = llm.structured(
-            "reflection_reviewer",
+        decision = generate_review(
+            llm,
             reflection_context,
-            ReflectionDecision,
             thinking=False,
             prompt_override=tracker.prompt.content,
             diagnostics=tracker.record_diagnostics,
         )
         reflection = decision.model_dump(mode="json")
-        return tracker.complete({"reflection": reflection, "revision_round": revision_round})
+        repository.add_artifact(state.task_id, state.run_id, 'validation', '模型终审决定', reflection)
+        return tracker.complete({"reflection": reflection, "revision_round": revision_round,
+                                 "decision_history": [*state.decision_history, reflection]})
     except Exception as exc:
         tracker.fail(exc)
         raise
@@ -446,6 +421,15 @@ def reflect_node(state: AnalysisState) -> dict[str, Any]:
 
 def route_reflection(state: AnalysisState) -> str:
     return route_reflection_impl(state)
+
+
+def repair_citations_node(state: AnalysisState) -> dict[str, Any]:
+    updated = state.model_copy(update={'reflection': {
+        'verdict': 'revise', 'route': 'rewrite', 'reason': '修复结构性引用错误', 'issues': [],
+    }})
+    result = draft_node(updated)
+    return {**result, 'citation_repair_round': state.citation_repair_round + 1,
+            'reflection': updated.reflection}
 
 
 def route_validation(state: AnalysisState) -> str:
@@ -457,43 +441,34 @@ def route_execute(state: AnalysisState) -> str:
 
 
 def _delivery_gate(state: AnalysisState, draft: AnalysisDraft, validation: ValidationReport) -> DeliveryGate:
-    """Expose structural validation and the model review verdict to the UI."""
+    """Publish the model's decision without a backend correctness gate."""
     checks: list[DeliveryCheck] = []
-    evidence_traceable = validation.passed
-    checks.append(DeliveryCheck(code="evidence_traceable", label="证据可追溯", passed=evidence_traceable,
-                                severity=Severity.ERROR if not evidence_traceable else Severity.INFO,
-                                message="结论引用可追溯到证据或计算输入。" if evidence_traceable else "存在未通过证据校验的结论。"))
+    unresolved_errors = 0
 
-    unresolved_errors = sum(1 for issue in validation.issues if issue.severity == Severity.ERROR)
-    no_errors = unresolved_errors == 0
-    checks.append(DeliveryCheck(code="no_unresolved_errors", label="无未解决错误", passed=no_errors,
-                                severity=Severity.ERROR if not no_errors else Severity.INFO,
-                                message="没有未解决的证据错误。" if no_errors else f"仍有 {unresolved_errors} 项证据错误。"))
-
-    review_accepted = not state.reflection or state.reflection.get("verdict") == "pass"
+    review_accepted = bool(state.reflection and state.reflection.get("verdict") == "pass")
     checks.append(DeliveryCheck(
         code="model_review_accepted",
-        label="模型复核通过",
+        label="模型审核通过",
         passed=review_accepted,
         severity=Severity.ERROR if not review_accepted else Severity.INFO,
-        message="模型未要求继续修改。" if review_accepted else "模型复核仍要求修改结果。",
+        message="模型已认可本报告。" if review_accepted else "模型尚未认可报告，修订资源已用尽。",
     ))
 
-    if not no_errors or not review_accepted:
+    if not review_accepted:
         status = TaskStatus.NEEDS_REVIEW.value
     elif draft.warnings:
         status = TaskStatus.COMPLETED_WITH_WARNINGS.value
     else:
         status = TaskStatus.COMPLETED.value
     return DeliveryGate(status=status, checks=checks,
-                        repair_count=min(state.revision_round, settings.max_revision_rounds),
-                        issues=[item.model_dump(mode="json") for item in validation.issues],
-                        new_information_count=len(draft.insights), unresolved_error_count=unresolved_errors)
+                        repair_count=state.citation_repair_round + min(state.revision_round, settings.max_revision_rounds),
+                        issues=[],
+                        new_information_count=len(draft.sections) if draft.report_schema_version == 2 else len(draft.insights), unresolved_error_count=unresolved_errors)
 
 
 def finish_node(state: AnalysisState) -> dict[str, Any]:
     draft = AnalysisDraft.model_validate(state.draft)
-    validation = ValidationReport.model_validate(state.validation)
+    validation = ValidationReport(passed=True)
     gate = _delivery_gate(state, draft, validation)
     draft.delivery = gate
     if gate.status == TaskStatus.NEEDS_REVIEW.value:
@@ -502,7 +477,7 @@ def finish_node(state: AnalysisState) -> dict[str, Any]:
             repository.add_message(state.task_id, "assistant", message)
         repository.update_task(
             state.task_id, status=TaskStatus.NEEDS_REVIEW, progress=95,
-            status_message="结果需要人工复核", error=message,
+            status_message="模型尚未认可报告", error=message,
         )
         return {"draft": draft.model_dump(mode="json"), "final_status": gate.status, "error": message}
     final_status = TaskStatus(gate.status)
@@ -535,9 +510,13 @@ def _draft_context(
 ) -> dict[str, Any]:
     return {
         "user_question": state.analysis_question or state.user_question,
+        "user_original_request": state.user_question,
         "clarification_answer": state.clarification_answer,
         "analysis_plan": state.plan,
-        "previous_result": state.previous_result or {},
+        "delivery_decision": state.intent,
+        # During a rewrite the current draft supersedes the snapshot result;
+        # sending both duplicates the same report in the model request.
+        "previous_result": (state.previous_result or {}) if not state.draft else {},
         "confirmed_policies": {},
         "verified_results": _verified_result_catalog(state),
         "evidence_catalog": _evidence_catalog(state),
@@ -554,12 +533,22 @@ def _reflection_context(
     return {
         "user_question": state.analysis_question or state.user_question,
         "clarification_answer": state.clarification_answer,
-        "analysis_plan": state.plan,
-        "analysis_draft": state.draft,
-        "structural_validation": state.validation,
-        "evidence_catalog": _evidence_catalog(state),
         "revision_round": revision_round,
         "maximum_revision_rounds": settings.max_revision_rounds,
+        "budget_exhausted": revision_round > settings.max_revision_rounds,
+        "prior_review_decisions": state.decision_history,
+        "analysis_plan": state.plan,
+        "analysis_draft": state.draft,
+        "user_original_request": state.user_question,
+        "report_outline": [{"id": section["id"], "title": section["title"]}
+                           for section in (state.draft or {}).get("sections", [])],
+        "incomplete_steps": [item for item in _verified_result_catalog(state) if item.get('status') == 'error'],
+        # Evidence catalog is the canonical, citation-aware representation.
+        # Raw tool rows would duplicate every query result in final review.
+        "query_results": _verified_result_catalog(state),
+        "data_revision": state.data_revision,
+        "evidence_catalog": _evidence_catalog(state),
+        "remaining_tool_calls": max(0, settings.max_tool_calls - state.tool_call_count),
     }
 
 
@@ -573,6 +562,8 @@ def _verified_result_catalog(state: AnalysisState) -> list[dict[str, Any]]:
             "evidence_ids": item.get("evidence_ids", []),
             "warnings": item.get("warnings", []),
             "error": item.get("error"),
+            "execution_metadata": item.get("execution_metadata", {}),
+            "query": (item.get("arguments") or {}).get("sql"),
         }
         for item in state.tool_results
     ]
@@ -580,21 +571,8 @@ def _verified_result_catalog(state: AnalysisState) -> list[dict[str, Any]]:
 
 def _revision_feedback(state: AnalysisState) -> dict[str, Any] | None:
     if state.reflection and state.reflection.get("verdict") == "revise":
-        return {"review": state.reflection, "structural_validation": state.validation}
+        return {"review": state.reflection}
     return None
-
-
-def _query_spec_from_arguments(arguments: dict[str, Any]) -> QuerySpec:
-    raw = arguments.get("query")
-    if not isinstance(raw, dict):
-        raise ToolError("结构化查询缺少 query 对象")
-    try:
-        spec = QuerySpec.model_validate(raw)
-    except Exception as exc:
-        raise ToolError(f"结构化查询参数无效：{exc}") from exc
-    if spec.limit > settings.max_query_rows:
-        raise ToolError(f"查询行数 {spec.limit} 超过执行上限 {settings.max_query_rows}")
-    return spec
 
 
 def _finalize_draft(state: AnalysisState, draft: AnalysisDraft) -> AnalysisDraft:
@@ -622,7 +600,7 @@ def _publish_chart_artifacts(state: AnalysisState, draft: AnalysisDraft) -> None
         for item in repository.list_artifacts(state.task_id, state.run_id)
         if item.artifact_type == "chart"
     }
-    for chart in draft.charts:
+    for chart in report_charts(draft):
         if chart.id in existing:
             continue
         repository.add_artifact(
@@ -658,6 +636,100 @@ def prepare_context_node(state: AnalysisState) -> dict[str, Any]:
     }
 
 
+def referenced_evidence_ids(value: Any) -> set[str]:
+    if isinstance(value, list):
+        return set().union(*(referenced_evidence_ids(item) for item in value))
+    if not isinstance(value, dict):
+        return set()
+    refs = set(value.get('evidence_refs', [])) | set(value.get('summary_evidence_refs', []))
+    refs.update(value.get('evidence_ids', []))
+    for key in ('evidence_id', 'dataset_ref'):
+        if value.get(key):
+            refs.add(value[key])
+    return refs | set().union(*(referenced_evidence_ids(item) for item in value.values()))
+
+
+def assess_results_node(state: AnalysisState) -> dict[str, Any]:
+    tracker = start_node(state, 'assess_results')
+    try:
+        plan = AnalysisPlan.model_validate(state.plan)
+        previous_action = (state.result_decision or {}).get('action')
+        no_progress_after_replan = previous_action == 'replan' and not plan.steps
+        decision_context = {
+            'user_question': state.analysis_question or state.user_question,
+            'conversation_context': state.conversation_summary or {},
+            'delivery_decision': state.intent,
+            'analysis_plan': state.plan, 'completed_step_ids': state.completed_step_ids,
+            'pending_steps': [
+                step.model_dump(mode='json') for step in plan.steps
+                if step.id not in state.completed_step_ids
+            ],
+            'query_results': _verified_result_catalog(state), 'query_failures': state.query_failures,
+            'previous_result': state.previous_result,
+            'evidence_catalog': _evidence_catalog(state),
+            'dataset_catalog': planner_catalog(
+                [DatasetInfo.model_validate(item) for item in state.datasets], state.task_id
+            ),
+            'decision_history': state.decision_history,
+            'remaining_tool_calls': max(0, settings.max_tool_calls - state.tool_call_count),
+            'technical_progress': {
+                'plan_step_count': len(plan.steps),
+                'completed_step_count': len(state.completed_step_ids),
+                'tool_result_count': len(state.tool_results),
+                'replan_produced_no_steps': no_progress_after_replan,
+            },
+        }
+        response_model = ConvergenceDecision if no_progress_after_replan else ResultDecision
+        convergence_instruction = ''
+        if no_progress_after_replan:
+            convergence_instruction = (
+                '\n当前属于无进展收敛场景：你上次要求 replan，但规划模型仍决定没有可执行步骤。'
+                '你必须依据已有证据自行选择 answer（对话分析）、draft（用户要求报告）或 ask_user（确实必须补充输入）；'
+                '后端不替你判断报告正确性。'
+            )
+        decision = llm.structured('result_reviewer', decision_context, response_model,
+            thinking=False, prompt_override=tracker.prompt.content + convergence_instruction,
+            diagnostics=tracker.record_diagnostics)
+        value = decision.model_dump(mode='json')
+        repository.add_artifact(state.task_id, state.run_id, 'validation', '模型查询结果决定', value)
+        return tracker.complete({'result_decision': value,
+                                 'decision_history': [*state.decision_history, value]})
+    except Exception as exc:
+        tracker.fail(exc)
+        raise
+
+
+def route_results(state: AnalysisState) -> str:
+    action = ResultDecision.model_validate(state.result_decision).action
+    if action == 'continue':
+        return route_execute_impl(state)
+    return {'replan': 'plan', 'draft': 'draft', 'ask_user': 'ask_user', 'answer': 'answer'}[action]
+
+
+def answer_node(state: AnalysisState) -> dict[str, Any]:
+    decision = ResultDecision.model_validate(state.result_decision)
+    repository.add_message(state.task_id, 'assistant', decision.answer.strip())
+    repository.update_task(state.task_id, status=TaskStatus.OFF_TOPIC, progress=100,
+                           status_message='分析回答完成', clear_error=True)
+    return {'final_status': TaskStatus.OFF_TOPIC.value}
+
+
+def route_after_execute(state: AnalysisState) -> str:
+    """A rejected SQL query returns to the model so it can repair its own SQL."""
+    return "plan" if state.query_failures else "assess_results"
+
+
+def ask_user_node(state: AnalysisState) -> dict[str, Any]:
+    decision = state.reflection or state.result_decision or {}
+    question = decision.get('question') or decision.get('reason')
+    if not question:
+        raise ValueError('模型未提供待确认的问题')
+    repository.add_message(state.task_id, 'assistant', question)
+    repository.update_task(state.task_id, status=TaskStatus.NEEDS_CLARIFICATION,
+                           status_message='模型需要补充信息', clarification_question=question)
+    return {'final_status': 'needs_clarification'}
+
+
 def build_graph():
     def cancellable(node_name: str, node):
         def wrapped(state: AnalysisState):
@@ -676,7 +748,14 @@ def build_graph():
     builder.add_node("plan", cancellable("plan", plan_node))
     builder.add_node("clarify", cancellable("clarify", clarify_node))
     builder.add_node("execute", cancellable("execute", execute_node))
+    builder.add_node("assess_results", cancellable("assess_results", assess_results_node))
+    builder.add_node("ask_user", cancellable("ask_user", ask_user_node))
+    builder.add_node("answer", cancellable("answer", answer_node))
+    builder.add_edge("answer", END)
+    builder.add_edge("ask_user", END)
     builder.add_node("draft", cancellable("draft", draft_node))
+    builder.add_node("repair_citations", cancellable("repair_citations", repair_citations_node))
+    builder.add_edge("repair_citations", "validate")
     builder.add_node("validate", cancellable("validate", validate_node))
     # Kept as a resume-compatible entry for runs created by older versions;
     # new runs never route through it.
@@ -692,14 +771,18 @@ def build_graph():
     builder.add_edge("respond", END)
     builder.add_conditional_edges("plan", route_plan_impl, {"execute": "execute", "clarify": "clarify"})
     builder.add_edge("clarify", END)
-    builder.add_conditional_edges("execute", route_execute_impl, {"execute": "execute", "draft": "draft"})
+    builder.add_conditional_edges(
+        "execute", route_after_execute, {"plan": "plan", "assess_results": "assess_results"}
+    )
+    builder.add_conditional_edges("assess_results", route_results,
+                                  {name: name for name in ('execute', 'plan', 'draft', 'ask_user', 'answer')})
     # Structural evidence checks run before the model reviewer.
-    builder.add_edge("draft", "validate")
-    builder.add_conditional_edges("validate", route_validation_impl, {"finish": "finish", "reflect": "reflect"})
+    builder.add_edge("draft", "reflect")
+    builder.add_conditional_edges("validate", route_validation_impl, {"finish": "finish", "reflect": "reflect", "repair_citations": "repair_citations"})
     builder.add_conditional_edges(
         "reflect",
         route_reflection_impl,
-        {"finish": "finish", "replan": "plan", "rewrite": "draft"},
+        {"finish": "finish", "replan": "plan", "rewrite": "draft", "ask_user": "ask_user"},
     )
     builder.add_edge("finish", END)
     settings.data_dir.mkdir(parents=True, exist_ok=True)
@@ -737,11 +820,14 @@ def run_analysis(run_id: str) -> None:
             conversation_summary=conversation.model_dump(mode="json"),
             conversation_messages=[item.model_dump(mode="json") for item in messages],
             previous_result=snapshot.result.model_dump(mode="json") if snapshot.result else None,
+            inherited_evidence_ids=[item.id for item in repository.list_evidence(task_id)
+                                    if item.data_revision == snapshot.data_revision],
+            data_revision=snapshot.data_revision,
             datasets=[item.model_dump(mode="json") for item in snapshot.datasets],
             confirmed_relationships=[item.model_dump(mode="json") for item in snapshot.relationships if item.status == "confirmed"],
         )
         result = graph.invoke(initial, config={"configurable": {"thread_id": run_id},
-                                               "recursion_limit": 16 + settings.max_tool_calls + settings.max_revision_rounds * 6})
+                                               "recursion_limit": 24 + settings.max_tool_calls * 4 + settings.max_revision_rounds * 6})
         final_status = str(result.get("final_status") or repository.get_task(task_id).status.value)
         has_draft = final_status in {
             TaskStatus.COMPLETED.value,

@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Database, Download, FileSpreadsheet, Link2, Paperclip, RefreshCw, Send, Square } from 'lucide-vue-next'
-const AnalysisChart = defineAsyncComponent(() => import('../components/AnalysisChart.vue'))
+import { Database, Download, FileSpreadsheet, Link2, Paperclip, RefreshCw, Send, Square, PanelLeftClose, PanelLeftOpen, X } from 'lucide-vue-next'
+import ReportDocument from '../components/ReportDocument.vue'
+import { reportEvidenceIds } from '../report-document'
 import { api } from '../api'
+import { runDuration } from '../run-duration'
 import { buildConversationTurns, resolveRetryQuestion, type ConversationTurn } from '../conversation'
 import { useTaskStore } from '../stores/task'
 
@@ -18,10 +20,35 @@ const feedbackMessages = ref<string[]>([])
 function showFeedback(message: string) { feedbackMessages.value.push(message) }
 const ElMessage = { error: showFeedback, success: showFeedback, warning: showFeedback }
 const prompt = ref('')
+const clockNow = ref(Date.now())
+let durationTimer: ReturnType<typeof setInterval> | undefined
+const currentTimedRun = computed(() => store.runs.find(run => run.id === store.task?.pending_run_id) ?? store.runs[0])
+watch(() => store.isRunning, running => {
+  clearInterval(durationTimer)
+  clockNow.value = Date.now()
+  if (running) durationTimer = setInterval(() => { clockNow.value = Date.now() }, 1000)
+}, { immediate: true })
+onBeforeUnmount(() => clearInterval(durationTimer))
+const editingReport = ref(false)
+async function startReportEdit() {
+  editingReport.value = true
+  await nextTick()
+  promptInput.value?.focus()
+}
 const input = ref<HTMLInputElement>()
 const promptInput = ref<HTMLTextAreaElement>()
 const drawerOpen = ref(false)
 const sourceDrawerOpen = ref(false)
+async function removeFile(fileId: string) {
+  if (!store.task || store.busy || store.isRunning) return
+  store.busy = true
+  try {
+    await api.removeFile(store.task.id, fileId)
+    await store.loadTask(store.task.id)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '移除失败')
+  } finally { store.busy = false }
+}
 const datasetWorkspaceOpen = ref(false)
 const workspaceInitialDatasetId = ref('')
 const chartEvidence = ref<Record<string, Awaited<ReturnType<typeof import('../api').api.getEvidence>>>>({})
@@ -30,6 +57,36 @@ const chartErrors = ref<Record<string, string>>({})
 const relationSaving = ref(false)
 const stopping = ref(false)
 const composer = ref<HTMLElement>()
+const workspace = ref<HTMLElement>()
+const reportVisible = ref(true)
+const conversationWidth = ref(330)
+const resizing = ref(false)
+const maximumConversationWidth = ref(600)
+let workspaceObserver: ResizeObserver | undefined
+
+function resizeConversation(value: number) {
+  conversationWidth.value = Math.round(Math.max(300, Math.min(maximumConversationWidth.value, value)))
+}
+function dragDivider(event: PointerEvent) {
+  if (!resizing.value || !workspace.value) return
+  resizeConversation(workspace.value.getBoundingClientRect().right - event.clientX)
+}
+function startDividerDrag(event: PointerEvent) {
+  if (event.button !== 0) return
+  resizing.value = true
+  ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
+  event.preventDefault()
+}
+function moveDivider(event: KeyboardEvent) {
+  const widths: Record<string, number> = {
+    ArrowLeft: conversationWidth.value + 20,
+    ArrowRight: conversationWidth.value - 20,
+    Home: 300,
+    End: maximumConversationWidth.value,
+  }
+  if (event.key in widths) { event.preventDefault(); resizeConversation(widths[event.key]) }
+}
+const reportTargetMounted = ref(false)
 const composerHeight = ref(156)
 let composerObserver: ResizeObserver | undefined
 
@@ -56,6 +113,13 @@ const conversationTurns = computed(() => {
   return turns.filter((turn) => turn.run?.status !== 'needs_clarification')
 })
 onMounted(() => {
+  reportTargetMounted.value = true
+  workspaceObserver = new ResizeObserver(() => {
+    const width = workspace.value?.clientWidth ?? 1000
+    maximumConversationWidth.value = Math.max(300, Math.min(600, width - 560, Math.floor(width * 0.45)))
+    resizeConversation(conversationWidth.value)
+  })
+  if (workspace.value) workspaceObserver.observe(workspace.value)
   void initialize()
   composerObserver = new ResizeObserver(() => {
     composerHeight.value = composer.value?.getBoundingClientRect().height ?? 156
@@ -63,9 +127,10 @@ onMounted(() => {
   if (composer.value) composerObserver.observe(composer.value)
 })
 watch(() => route.params.id, () => initialize())
-onBeforeUnmount(() => { store.closeEvents(); composerObserver?.disconnect() })
+onBeforeUnmount(() => { store.closeEvents(); composerObserver?.disconnect(); workspaceObserver?.disconnect() })
 
 async function initialize() {
+  editingReport.value = false
   feedbackMessages.value = []
   const id = route.params.id as string | undefined
   sourceDrawerOpen.value = false
@@ -104,11 +169,16 @@ async function confirmRelationships() {
 
 watch(() => store.task?.result, loadChartEvidence, { deep: true })
 async function loadChartEvidence() {
-  for (const chart of store.task?.result?.charts ?? []) {
+  const task = store.task
+  if (!task?.result) return
+  for (const dataset_ref of reportEvidenceIds(task.result)) {
+    const chart = { dataset_ref }
     if (!chartEvidence.value[chart.dataset_ref]) {
       chartLoading.value[chart.dataset_ref] = true
       try {
-        chartEvidence.value[chart.dataset_ref] = await import('../api').then(({ api }) => api.getEvidence(store.task!.id, chart.dataset_ref))
+        const evidence = await api.getEvidence(task.id, chart.dataset_ref)
+        if (store.task?.id !== task.id || store.task.result !== task.result) return
+        chartEvidence.value[chart.dataset_ref] = evidence
         delete chartErrors.value[chart.dataset_ref]
       } catch (reason) {
         chartErrors.value[chart.dataset_ref] = reason instanceof Error ? reason.message : '图表数据加载失败'
@@ -138,11 +208,15 @@ async function pickFiles(event: Event) {
   if (input.value) input.value.value = ''
 }
 
-async function submit(text = prompt.value) {
+async function submit(text = prompt.value, retryRunId?: string) {
   const content = text.trim()
   if (!content || store.busy || store.isRunning) return
   try {
-    await store.send(content)
+    const isReportEdit = editingReport.value && text === prompt.value
+    await store.send(isReportEdit
+      ? `请根据以下修改要求修改当前报告，结合上一份报告和原始数据，重新生成完整分析报告作为当前报告，不要仅作聊天回复。修改要求：\n${content}`
+      : content, retryRunId)
+    if (isReportEdit) editingReport.value = false
     if (prompt.value.trim() === content) prompt.value = ''
     if (store.task && route.params.id !== store.task.id) await router.replace(`/tasks/${store.task.id}`)
   }
@@ -198,20 +272,31 @@ function openDatasetWorkspace(datasetId?: string) {
   workspaceInitialDatasetId.value = datasetId ?? ''
   datasetWorkspaceOpen.value = true
 }
+function displayMetric(value: string) {
+  if (!/^[+-]?\d+(\.\d+)?$/.test(value)) return value
+  const [integer, fraction] = value.split('.')
+  const grouped = integer!.replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+  return fraction && !/^0+$/.test(fraction) ? `${grouped}.${fraction}` : grouped
+}
 </script>
 
 <template>
-  <main class="workspace" :style="{ '--composer-height': `${composerHeight}px` }">
+  <main ref="workspace" class="workspace analysis-workspace" :class="{ 'has-report': !!store.task?.result && reportVisible, resizing }" :style="{ '--composer-height': `${composerHeight}px`, '--conversation-width': `${conversationWidth}px` }">
     <header class="topbar">
-      <div><h1>{{ store.task?.title ?? '新建分析' }}</h1><p>{{ store.task?.status_message ?? '准备数据后开始分析' }}</p></div>
+      <div><h1>{{ store.task?.title ?? '新建分析' }}</h1><p>{{ store.task?.status_message ?? '准备数据后开始分析' }}<span v-if="currentTimedRun" class="run-duration" title="从提交请求到结束的总耗时，包含排队时间"> · {{ currentTimedRun.finished_at ? '本次用时' : '已用时' }} {{ runDuration(currentTimedRun.started_at, currentTimedRun.finished_at, clockNow) }}</span></p></div>
       <div class="top-actions" v-if="store.task && sourceCount">
+        <button v-if="store.task.result" class="icon-button" :title="reportVisible ? '隐藏报告' : '显示报告'" :aria-label="reportVisible ? '隐藏报告' : '显示报告'" :aria-pressed="reportVisible" aria-controls="report-pane" @click="reportVisible = !reportVisible"><PanelLeftClose v-if="reportVisible" :size="18" /><PanelLeftOpen v-else :size="18" /></button>
+        <button v-if="store.task.result" class="button" :disabled="store.busy || store.isRunning" @click="startReportEdit">修改报告</button>
         <button class="button source-trigger" @click="sourceDrawerOpen=true"><Database :size="16" />数据来源 <span>{{ sourceCount }}</span></button>
         <button v-if="terminal.has(store.task.status) && store.task.result" class="button" @click="publishReport"><Download :size="16" />发布报告</button>
         <button v-if="terminal.has(store.task.status) && store.task.result" class="button primary" @click="download('excel')"><Download :size="16" />Excel 结果</button>
       </div>
     </header>
 
-    <section class="content">
+    <section v-show="reportVisible" id="report-pane" class="report-pane" aria-label="分析报告"></section>
+    <div v-if="store.task?.result && reportVisible" class="report-divider" role="separator" aria-label="调整会话区域宽度" aria-orientation="vertical" aria-controls="report-pane" :aria-valuemin="300" :aria-valuemax="maximumConversationWidth" :aria-valuenow="conversationWidth" tabindex="0" @pointerdown="startDividerDrag" @pointermove="dragDivider" @pointerup="resizing = false" @pointercancel="resizing = false" @lostpointercapture="resizing = false" @keydown="moveDivider"></div>
+    <section class="content" aria-label="分析对话">
+      <h2 v-if="store.task?.result" class="conversation-heading">分析对话</h2>
       <div v-if="!store.task?.files.length && !store.task?.messages.length && !store.isRunning" class="empty-state">
         <div class="empty-symbol"><FileSpreadsheet :size="28" /></div>
         <h2>把表格交给我，直接说你想分析什么</h2>
@@ -235,9 +320,14 @@ function openDatasetWorkspace(datasetId?: string) {
 
       <section v-for="turn in conversationTurns" :key="turn.user.id" class="conversation-turn">
         <div class="user-message">{{ turn.user.content }}</div>
+        <div v-if="turn.run" class="turn-duration" title="包含排队时间">{{ turn.run.finished_at ? '用时' : '已用时' }} {{ runDuration(turn.run.started_at, turn.run.finished_at, clockNow) }}</div>
 
         <div v-if="store.isRunning && turn.run?.id === store.task?.pending_run_id" class="assistant-messages">
+          <div v-if="store.streamedText" class="assistant-message" style="white-space: pre-wrap; overflow-wrap: anywhere">{{ store.streamedText }}</div>
           <div class="assistant-message thinking-message" role="status">{{ store.task?.status_message === '正在整理较长会话' ? '正在整理上下文' : (store.task?.status_message?.startsWith('正在分段生成报告') || ['正在整理分析上下文', '正在修正报告引用', '正在修正报告格式', '正在生成报告'].includes(store.task?.status_message ?? '')) ? store.task?.status_message : '正在思考' }}</div>
+        </div>
+        <div v-else-if="isActiveTurn(turn) && store.task?.result" class="assistant-messages">
+          <div class="assistant-message" role="status">报告《{{ store.task.result.title }}》已生成。{{ store.task.result.warnings.length ? '报告中包含风险提示和分析局限，请一并关注。' : '' }}</div>
         </div>
         <div v-else-if="!isActiveTurn(turn) && !(turn.run?.status === 'needs_clarification' && store.task?.status === 'needs_clarification')" class="assistant-messages">
           <div v-for="message in turn.assistantMessages" :key="message.id" class="assistant-message">{{ message.content }}</div>
@@ -249,29 +339,23 @@ function openDatasetWorkspace(datasetId?: string) {
 
         <section v-if="turn.run?.status === 'failed'" class="assistant-messages">
           <div v-if="!runFeedbackAlreadyShown(turn)" class="assistant-message">{{ turn.run.error || '本次请求没有完成。' }}</div>
-          <div><button class="icon-button" title="重新分析" aria-label="重新分析" :disabled="store.isRunning || store.busy" @click="submit(resolveRetryQuestion(turn, conversationTurns))"><RefreshCw :size="16" /></button></div>
+          <div><button class="icon-button" title="重新分析" aria-label="重新分析" :disabled="store.isRunning || store.busy" @click="submit(resolveRetryQuestion(turn, conversationTurns), turn.run?.id)"><RefreshCw :size="16" /></button></div>
         </section>
 
         <section v-if="turn.run?.status === 'needs_review' && !runFeedbackAlreadyShown(turn)" class="assistant-messages">
-          <div class="assistant-message">{{ turn.run.error || '结果需要人工复核。' }}</div>
+          <div class="assistant-message">{{ turn.run.error || '模型尚未认可本次报告。' }}</div>
         </section>
 
         <details v-if="turn.run?.status === 'needs_review' && turn.run.result?.delivery?.issues?.length" class="assistant-message">
-          <summary>草稿校验详情 · 已修正 {{ turn.run.result.delivery.repair_count ?? 0 }} 次</summary>
+          <summary>模型审核详情 · 已修订 {{ turn.run.result.delivery.repair_count ?? 0 }} 次</summary>
           <ul><li v-for="(issue, index) in turn.run.result.delivery.issues" :key="index" style="overflow-wrap: anywhere; white-space: pre-wrap">{{ issue.target }}：{{ issue.message }}</li></ul>
         </details>
 
+        <Teleport v-if="reportTargetMounted" to="#report-pane">
         <div v-if="isActiveTurn(turn) && store.task?.result" class="result-view">
-        <header class="result-title"><div><h2>{{ store.task.result.title }}</h2><p>{{ store.task.result.summary }}</p></div><button class="button" @click="prompt='继续分析：'">继续追问</button></header>
-        <section v-if="store.task.result.insights?.length" class="result-panel insights-panel"><header><strong>关键结论</strong><span>{{ store.task.result.insights.length }} 条</span></header><div class="insight-list"><article v-for="insight in store.task.result.insights" :key="insight.id" :class="['insight-card', insight.severity]"><div class="insight-head"><strong>{{ insight.title }}</strong><em>{{ insight.severity === 'error' ? '需处理' : insight.severity === 'warning' ? '关注' : '结论' }}</em></div><p>{{ insight.conclusion }}</p><small>{{ insight.significance }}</small><div v-if="insight.action" class="insight-action"><b>建议</b>{{ insight.action }}</div><button v-if="insight.evidence_refs[0]" class="text-button" @click="openEvidence(insight.evidence_refs[0])">查看证据{{ insight.formula ? ` · ${insight.formula}` : '' }}</button></article></div></section>
-        <section v-if="store.task.result.metrics.length" class="metrics-row">
-          <button v-for="metric in store.task.result.metrics" :key="metric.label" @click="openEvidence(metric.evidence_refs[0])"><small>{{ metric.label }}</small><strong>{{ metric.value }}</strong><span :class="metric.direction">{{ metric.change }}</span></button>
-        </section>
-        <div class="result-grid">
-          <section v-for="chart in store.task.result.charts" :key="chart.id" class="result-panel chart-panel"><header><strong>{{ chart.title }}</strong><span>{{ chart.unit }}</span></header><AnalysisChart :spec="chart" :evidence="chartEvidence[chart.dataset_ref]" :loading="chartLoading[chart.dataset_ref]" :error="chartErrors[chart.dataset_ref]" /></section>
-          <details class="result-panel findings-panel"><summary><strong>原始发现</strong><span>{{ store.task.result.findings.length }} 条</span></summary><ol><li v-for="finding in store.task.result.findings" :key="finding.title"><button @click="openEvidence(finding.evidence_refs[0])"><strong>{{ finding.title }}</strong><span>{{ finding.detail }}</span></button></li></ol></details>
-        </div>
-        <section class="result-panel method-panel"><header><strong>口径、来源与风险提示</strong><span>结果已完成自动复核</span></header><div><article><strong>数据来源</strong><p>{{ store.task.files.map((file) => file.original_name).join('、') }}，共 {{ store.task.files.reduce((sum, file) => sum + file.row_count, 0).toLocaleString() }} 行。</p></article><article><strong>关键假设</strong><p>{{ store.task.result.assumptions.join('；') || '未使用额外假设。' }}</p></article><article><strong>风险提示</strong><p>{{ store.task.result.warnings.join('；') || '未发现需要单独提示的风险。' }}</p></article><article><strong>完成时间</strong><p>{{ formatTime(turn.run?.finished_at ?? store.task.updated_at) }}</p></article></div></section>
+        <header class="result-title"><div><h2>{{ store.task.result.title }}</h2><p>{{ store.task.result.summary }}</p></div></header>
+         <ReportDocument :report="store.task.result" :evidence="chartEvidence" :loading="chartLoading" :errors="chartErrors" @evidence="openEvidence" />
+        <section class="result-panel method-panel"><header><strong>口径、来源与风险提示</strong><span>模型审核通过</span></header><div><article><strong>数据来源</strong><p>{{ store.task.files.map((file) => file.original_name).join('、') }}，共 {{ store.task.files.reduce((sum, file) => sum + file.row_count, 0).toLocaleString() }} 行。</p></article><article><strong>关键假设</strong><p>{{ store.task.result.assumptions.join('；') || '未使用额外假设。' }}</p></article><article><strong>风险提示</strong><p>{{ store.task.result.warnings.join('；') || '未发现需要单独提示的风险。' }}</p></article><article><strong>完成时间</strong><p>{{ formatTime(turn.run?.finished_at ?? store.task.updated_at) }}</p></article></div></section>
         <details v-if="store.task.result.calculation_details?.length" class="result-panel calculation-panel">
           <summary><span><strong>计算明细</strong><small>查看工具、结果行数与证据来源</small></span><span>{{ store.task.result.calculation_details?.length ?? 0 }} 步</span></summary>
           <div class="calculation-list">
@@ -284,6 +368,7 @@ function openDatasetWorkspace(datasetId?: string) {
           </div>
         </details>
         </div>
+        </Teleport>
       </section>
 
       <section v-if="store.error && !store.uploadFailures.length && !conversationTurns.some((turn) => turn.run?.status === 'failed')" class="assistant-messages">
@@ -294,9 +379,10 @@ function openDatasetWorkspace(datasetId?: string) {
 
     <section ref="composer" class="composer">
       <div class="composer-box">
-        <div v-if="store.task?.files.length" class="file-chips"><button v-for="file in store.task.files.slice(0, 2)" :key="file.id" :title="`查看数据来源：${file.original_name}`" @click="sourceDrawerOpen=true">{{ file.original_name }}</button><button v-if="store.task.files.length > 2" title="查看全部数据来源" @click="sourceDrawerOpen=true">+{{ store.task.files.length - 2 }}</button></div>
-        <textarea ref="promptInput" v-model="prompt" rows="2" placeholder="输入消息或分析需求" @keydown.enter.exact.prevent="canSend && submit()" />
-        <div class="composer-actions"><div><button class="icon-button" title="上传 Excel 或 CSV" :disabled="store.busy || store.isRunning" @click="input?.click()"><Paperclip :size="19" /></button><span>最多 5 个文件，每个不超过 100 MB</span></div><button class="send-button" :title="store.isRunning ? '中止分析' : '发送消息'" :aria-label="store.isRunning ? '中止分析' : '发送消息'" :disabled="store.isRunning ? stopping || !store.task?.pending_run_id : !canSend" @click="store.isRunning ? stopCurrentRun() : submit()"><Square v-if="store.isRunning" :size="18" fill="currentColor" /><Send v-else :size="18" /></button></div>
+        <div v-if="editingReport" class="report-edit-mode"><strong>修改报告</strong><button class="text-button" @click="editingReport = false">取消修改</button></div>
+        <div v-if="store.task?.files.length" class="file-chips"><div v-for="file in store.task.files" :key="file.id" class="removable-file"><button :title="`查看数据来源：${file.original_name}`" @click="sourceDrawerOpen=true">{{ file.original_name }}</button><button class="remove-file" :title="`移除文件：${file.original_name}`" :aria-label="`移除文件：${file.original_name}`" :disabled="store.busy || store.isRunning" @click="removeFile(file.id)"><X :size="12" /></button></div></div>
+        <textarea ref="promptInput" v-model="prompt" rows="2" :placeholder="editingReport ? '输入报告修改要求' : '输入消息或分析需求'" @keydown.enter.exact.prevent="canSend && submit()" />
+        <div class="composer-actions"><div><button class="icon-button" title="上传 Excel 或 CSV" :disabled="store.busy || store.isRunning" @click="input?.click()"><Paperclip :size="19" /></button><span>最多 5 个文件，每个 ≤30MB；Excel ≤15 张表、总计 ≤30万行（含表头及隐藏表）</span></div><button class="send-button" :title="store.isRunning ? '中止分析' : '发送消息'" :aria-label="store.isRunning ? '中止分析' : '发送消息'" :disabled="store.isRunning ? stopping || !store.task?.pending_run_id : !canSend" @click="store.isRunning ? stopCurrentRun() : submit()"><Square v-if="store.isRunning" :size="18" fill="currentColor" /><Send v-else :size="18" /></button></div>
       </div>
       <input ref="input" hidden type="file" multiple accept=".xlsx,.csv" @change="pickFiles">
     </section>
@@ -305,3 +391,15 @@ function openDatasetWorkspace(datasetId?: string) {
     <DatasetWorkspace :open="datasetWorkspaceOpen" :task-id="store.task?.id" :datasets="store.task?.datasets ?? []" :initial-dataset-id="workspaceInitialDatasetId" :running="store.isRunning" @close="datasetWorkspaceOpen=false" @published="refreshAfterDatasetChange" />
   </main>
 </template>
+
+<style scoped>
+.analysis-workspace > .content {
+  padding-bottom: calc(var(--composer-height, 156px) + min(40vh, 480px));
+  scroll-padding-bottom: calc(var(--composer-height, 156px) + min(40vh, 480px));
+}
+.removable-file { position: relative; max-width: 100%; margin: 5px 6px 0 0; }
+.removable-file > button:first-child { max-width: 100%; padding-right: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-chips .removable-file .remove-file { position: absolute; top: -5px; right: -5px; width: 18px; height: 18px; padding: 0; display: grid; place-items: center; border-radius: 50%; background: white; border: 1px solid #d8d8d8; color: #666; }
+.file-chips .removable-file .remove-file:hover:not(:disabled) { color: #b64c46; border-color: #b64c46; }
+.remove-file:disabled { opacity: .4; cursor: not-allowed; }
+</style>

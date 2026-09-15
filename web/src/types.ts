@@ -25,7 +25,10 @@ export interface Metric { label: string; value: string; change?: string; directi
 export interface Finding { title: string; detail: string; severity: 'info' | 'warning' | 'error'; evidence_refs: string[]; evidence_pointers: EvidencePointer[] }
 export interface ChartSpec { id: string; title: string; chart_type: 'line' | 'bar' | 'stacked_bar' | 'pie' | 'waterfall' | 'scatter' | 'table'; dataset_ref: string; category_field: string; series: Array<{name: string; field: string}>; unit?: string; orientation?: 'vertical' | 'horizontal'; sort_order?: 'source' | 'category_asc' | 'value_desc'; max_items?: number; x_field?: string; y_field?: string; label_field?: string }
 export interface CalculationDetail { id: string; tool_name: string; title: string; status: 'success' | 'error'; row_count: number; evidence_refs: string[]; query?: string; warnings: string[] }
-export interface AnalysisDraft { title: string; summary: string; summary_evidence_refs: string[]; summary_evidence_pointers: EvidencePointer[]; metrics: Metric[]; findings: Finding[]; charts: ChartSpec[]; assumptions: string[]; warnings: string[]; suggested_questions: string[]; calculation_details?: CalculationDetail[]; insights?: Insight[]; delivery?: DeliveryGate; verification_level: 'legacy' | 'evidence' | 'cell' }
+export interface ReportText { text: string; evidence_refs: string[]; evidence_pointers: EvidencePointer[] }
+export interface ReportBlock { id: string; kind: 'paragraph' | 'list' | 'metrics' | 'table' | 'chart'; text: string; items: ReportText[]; metrics: Metric[]; chart?: ChartSpec | null; dataset_ref?: string | null; columns: string[]; evidence_refs: string[]; evidence_pointers: EvidencePointer[] }
+export interface ReportSection { id: string; title: string; blocks: ReportBlock[] }
+export interface AnalysisDraft { report_schema_version?: 1 | 2; sections?: ReportSection[]; title: string; summary: string; summary_evidence_refs: string[]; summary_evidence_pointers: EvidencePointer[]; metrics: Metric[]; findings: Finding[]; charts: ChartSpec[]; assumptions: string[]; warnings: string[]; suggested_questions: string[]; calculation_details?: CalculationDetail[]; insights?: Insight[]; delivery?: DeliveryGate; verification_level: 'legacy' | 'evidence' | 'cell' }
 export interface TaskSnapshot { id: string; title: string; status: TaskStatus; progress: number; status_message: string; files: UploadedFile[]; messages: MessageRecord[]; datasets: DatasetInfo[]; relationships: DatasetRelationship[]; result?: AnalysisDraft; clarification_question?: string; error?: string; active_run_id?: string; pending_run_id?: string; queue_position?: number; data_revision: number; created_at: string; updated_at: string }
 export interface TaskListItem { id: string; title: string; status: TaskStatus; status_message: string; file_names: string[]; created_at: string; updated_at: string }
 export interface EvidenceRecord { id: string; title: string; source: string; columns: string[]; rows: Record<string, unknown>[]; data_revision: number; source_dataset_ids: string[]; query?: string; query_hash?: string; created_at: string }
@@ -40,3 +43,34 @@ export interface UploadFailure { name: string; code: string; message: string }
 export interface UploadBatchResponse { outcome: 'success' | 'partial' | 'failed'; accepted_files: string[]; rejected_files: UploadFailure[]; task: TaskSnapshot }
 export interface TaskListResponse { items: TaskListItem[]; total: number; page: number; page_size: number }
 export interface WorkflowRun { id: string; task_id: string; question: string; status: string; parent_run_id?: string; entry_node: string; result?: AnalysisDraft; is_active: boolean; data_revision: number; message_sequence: number; claimed_at?: string; heartbeat_at?: string; attempt_count: number; error?: string; started_at: string; finished_at?: string }
+export interface ModelSettings {
+  mode: 'ollama' | 'openai_compatible'
+  provider: string
+  model: string
+  api_key: string
+  api_key_configured: boolean
+  base_url: string
+  temperature: number
+  max_tokens: number
+  context_window: number
+}
+
+export interface ModelSettingsUpdate {
+  mode?: 'ollama' | 'openai_compatible'
+  provider?: string
+  model?: string
+  api_key?: string
+  clear_api_key?: boolean
+  base_url?: string
+  temperature?: number
+  max_tokens?: number
+  context_window?: number
+}
+
+export interface ModelConnectionResult {
+  success: boolean
+  provider: string
+  model: string
+  message: string
+  latency_ms: number
+}

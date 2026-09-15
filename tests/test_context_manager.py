@@ -4,6 +4,8 @@ import pytest
 
 from app.config import settings
 from app.context_manager import ContextManager
+from app.model_context import CloudContextPolicy
+from app.models import ModelSettings
 from app.models import AnalysisDraft, ConversationMemory, EvidenceRecord, Finding
 from app.repository import repository
 
@@ -25,6 +27,14 @@ def _add_dialogue(task_id: str, count: int, width: int = 80) -> None:
 
 
 def _small_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "app.context_manager.model_settings.get",
+        lambda: ModelSettings(
+            mode="ollama", provider="ollama", model="test-local",
+            base_url="http://127.0.0.1:11434",
+            context_window=settings.model_context_tokens,
+        ),
+    )
     monkeypatch.setattr(settings, "model_context_tokens", 1800)
     monkeypatch.setattr(settings, "context_output_reserve_tokens", 300)
     monkeypatch.setattr(settings, "context_base_overhead_tokens", 200)
@@ -65,8 +75,8 @@ def test_summary_single_message_failure_preserves_checkpoint(memory_repo, monkey
     assert repository.get_task(memory_repo).messages == messages
 
 
-@pytest.mark.parametrize('value,valid', [('6800', True), ('几千', False)])
-def test_exact_fact_checks_source_and_survives_later_summary(memory_repo, monkeypatch, value, valid):
+@pytest.mark.parametrize('value', ['6800', '几千'])
+def test_model_fact_is_preserved_without_verbatim_validation(memory_repo, monkeypatch, value):
     from app.models import ExactMemoryFact
     repository.add_message(memory_repo, 'user', '客户A欠款6800元')
     messages = repository.get_task(memory_repo).messages
@@ -75,13 +85,8 @@ def test_exact_fact_checks_source_and_survives_later_summary(memory_repo, monkey
     monkeypatch.setattr('app.context_manager.llm.structured',
                         lambda *args, **kwargs: ConversationMemory(exact_facts=[fact]))
     manager = ContextManager()
-    if not valid:
-        with pytest.raises(ValueError, match='精确事实来源核对失败'):
-            manager.prepare(memory_repo, messages, current_question='继续', fits_context=lambda c: not c.recent_messages)
-        assert repository.get_conversation_memory(memory_repo) is None
-        return
     context, _ = manager.prepare(memory_repo, messages, current_question='继续', fits_context=lambda c: not c.recent_messages)
-    assert context.memory.exact_facts[0].value == '6800'
+    assert context.memory.exact_facts[0].value == value
     repository.add_message(memory_repo, 'user', '继续分析')
     monkeypatch.setattr('app.context_manager.llm.structured', lambda *args, **kwargs: ConversationMemory())
     context, _ = manager.prepare(memory_repo, repository.get_task(memory_repo).messages,
@@ -91,6 +96,16 @@ def test_exact_fact_checks_source_and_survives_later_summary(memory_repo, monkey
 
 
 def test_classifier_compacts_before_request_using_its_own_budget(memory_repo, monkeypatch):
+    monkeypatch.setattr(settings, 'model_context_tokens', 4096)
+    monkeypatch.setattr(settings, 'model_max_context_tokens', 4096)
+    monkeypatch.setattr(
+        'app.context_manager.model_settings.get',
+        lambda: ModelSettings(
+            mode='ollama', provider='ollama', model='test-local',
+            base_url='http://127.0.0.1:11434',
+            context_window=settings.model_context_tokens,
+        ),
+    )
     from unittest.mock import Mock
     from app.workflow_nodes import classify
     from app.models import AnalysisState, IntentDecision
@@ -141,6 +156,121 @@ def test_short_conversation_does_not_summarize(memory_repo: str, monkeypatch: py
     assert budget.compacted is False
     assert len(context.recent_messages) == 2
     assert context.memory is None
+
+
+def test_cloud_conversation_budget_uses_model_table_and_eighty_percent(
+    memory_repo: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.context_manager.model_settings.get",
+        lambda: ModelSettings(
+            mode="openai_compatible",
+            provider="openai",
+            model="gpt-5.6-terra",
+            base_url="https://api.example.test/v1",
+        ),
+    )
+
+    _context, budget = ContextManager().prepare(
+        memory_repo,
+        [],
+        current_question="分析数据",
+    )
+
+    assert budget.context_limit_tokens == 1_050_000
+    assert budget.compression_trigger_tokens == 840_000
+    assert budget.context_limit_source == "model_table"
+
+
+def test_unknown_cloud_model_budget_defaults_to_200k(
+    memory_repo: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.context_manager.model_settings.get",
+        lambda: ModelSettings(
+            mode="openai_compatible",
+            provider="custom",
+            model="private-model",
+            base_url="https://api.example.test/v1",
+        ),
+    )
+
+    _context, budget = ContextManager().prepare(
+        memory_repo,
+        [],
+        current_question="分析数据",
+    )
+
+    assert budget.context_limit_tokens == 200_000
+    assert budget.compression_trigger_tokens == 160_000
+    assert budget.context_limit_source == "default_200k"
+
+
+def test_long_term_memory_keeps_newest_items_with_bounded_lists() -> None:
+    from app.context_manager import (
+        MAX_MEMORY_COMPLETED_ANALYSES,
+        MAX_MEMORY_EVIDENCE_IDS,
+        MAX_MEMORY_EXACT_FACTS,
+    )
+    from app.models import AnalysisMemory, ExactMemoryFact
+
+    memory = ConversationMemory(
+        exact_facts=[ExactMemoryFact(
+            subject="s", metric="m", value=str(index), unit="元",
+            source_sequence=index, source_quote=f"值{index}"
+        ) for index in range(MAX_MEMORY_EXACT_FACTS + 5)],
+        completed_analyses=[AnalysisMemory(
+            question=str(index), conclusion="c"
+        ) for index in range(MAX_MEMORY_COMPLETED_ANALYSES + 5)],
+        referenced_evidence_ids=[f"ev_{index}" for index in range(MAX_MEMORY_EVIDENCE_IDS + 5)],
+    )
+    bounded = ContextManager._bound_memory(memory)
+    assert len(bounded.exact_facts) == MAX_MEMORY_EXACT_FACTS
+    assert bounded.exact_facts[0].value == "5"
+    assert len(bounded.completed_analyses) == MAX_MEMORY_COMPLETED_ANALYSES
+    assert bounded.completed_analyses[0].question == "5"
+    assert len(bounded.referenced_evidence_ids) == MAX_MEMORY_EVIDENCE_IDS
+    assert bounded.referenced_evidence_ids[0] == "ev_5"
+
+
+def test_cloud_conversation_compacts_when_eighty_percent_threshold_is_reached(
+    memory_repo: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.context_manager.model_settings.get",
+        lambda: ModelSettings(
+            mode="openai_compatible",
+            provider="custom",
+            model="tiny-test-model",
+            base_url="https://api.example.test/v1",
+        ),
+    )
+    monkeypatch.setattr(
+        "app.context_manager.cloud_context_policy",
+        lambda model: CloudContextPolicy(model, 5_000, 4_000, "tiny-test-model"),
+    )
+    _add_dialogue(memory_repo, 8, width=30)
+    calls: list[list[dict]] = []
+
+    def summarize(_prompt, payload, _model, **_options):
+        calls.append(payload["messages_to_merge"])
+        return ConversationMemory(task_goal="云端长会话")
+
+    monkeypatch.setattr("app.context_manager.llm.structured", summarize)
+    snapshot = repository.get_task(memory_repo)
+    _context, budget = ContextManager().prepare(
+        memory_repo,
+        snapshot.messages,
+        current_question="继续分析",
+        dynamic_context={"schema": "字段" * 200},
+    )
+
+    assert calls
+    assert budget.compacted is True
+    assert budget.compression_trigger_tokens == 4_000
 
 
 def test_long_conversation_compacts_and_preserves_recent_messages(

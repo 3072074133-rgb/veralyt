@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { computed, ref, shallowRef } from 'vue'
+import { computed, ref, shallowRef, watch } from 'vue'
 import { api } from '../api'
 import type { EvidenceRecord, RunArtifact, TaskEvent, TaskSnapshot, UploadBatchResponse, UploadFailure, WorkflowRun } from '../types'
 
@@ -84,13 +84,13 @@ export const useTaskStore = defineStore('task', () => {
     finally { busy.value = false }
   }
 
-  async function send(content: string) {
+  async function send(content: string, retryRunId?: string) {
     if (!content.trim() || busy.value || isRunning.value) return
     busy.value = true
     error.value = ''
     try {
       const id = task.value?.id ?? await createTask()
-      task.value = await api.sendMessage(id, content)
+      task.value = retryRunId ? await api.retryRun(id, retryRunId) : await api.sendMessage(id, content)
       runs.value = await api.listRuns(task.value.id)
       connectEvents(task.value.id)
     } catch (reason) {
@@ -167,6 +167,7 @@ export const useTaskStore = defineStore('task', () => {
     const connection = new EventSource(`/api/v1/tasks/${id}/events`)
     source = connection
     const names = [
+      'model.text',
       'task.created',
       'task.updated',
       'conversation.compacting',
@@ -189,6 +190,10 @@ export const useTaskStore = defineStore('task', () => {
       try { event = JSON.parse(raw.data) as TaskEvent }
       catch { return }
       if (event.task_id !== id) return
+      if (event.event_type === 'model.text') {
+        if (event.payload.run_id === task.value?.pending_run_id) streamedText.value = String(event.payload.text ?? '')
+        return
+      }
       if (event.schema_version !== 1) { void refresh(); return }
       if (task.value?.id === id) {
         task.value = {
@@ -229,7 +234,9 @@ export const useTaskStore = defineStore('task', () => {
   }
 
   function closeEvents() { source?.close(); source = undefined }
-  return { task, runs, busy, error, evidence, artifactsByRun, uploadFailures, currentTaskId, isRunning, createTask, loadTask, startNewAnalysis, upload, send, openEvidence, artifactsForRun, loadArtifacts, cancelQueuedRun, stopCurrentRun, closeEvents }
+  const streamedText = ref('')
+  watch(() => task.value?.pending_run_id, () => { streamedText.value = '' })
+  return { streamedText, task, runs, busy, error, evidence, artifactsByRun, uploadFailures, currentTaskId, isRunning, createTask, loadTask, startNewAnalysis, upload, send, openEvidence, artifactsForRun, loadArtifacts, cancelQueuedRun, stopCurrentRun, closeEvents }
 })
 
 function isRunArtifact(value: unknown): value is RunArtifact {

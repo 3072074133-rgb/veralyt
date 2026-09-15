@@ -6,6 +6,8 @@ from typing import Any, Callable
 
 from .config import settings
 from .llm import LLMContextOverflowError, LLMStructuredOutputError, llm
+from .model_context import cloud_context_policy
+from .model_settings import model_settings
 from .models import (
     AnalysisDraft,
     AnalysisMemory,
@@ -17,12 +19,20 @@ from .models import (
 from .repository import repository
 
 
+MAX_MEMORY_EXACT_FACTS = 256
+MAX_MEMORY_COMPLETED_ANALYSES = 10
+MAX_MEMORY_EVIDENCE_IDS = 512
+
+
 @dataclass(frozen=True)
 class ContextBudget:
     input_tokens: int
     message_tokens: int
     available_message_tokens: int
     compacted: bool
+    context_limit_tokens: int
+    compression_trigger_tokens: int
+    context_limit_source: str
 
 
 class ContextManager:
@@ -50,7 +60,11 @@ class ContextManager:
         covered = record.covered_until_sequence if record else 0
         version = record.version if record else None
         unsummarized = [item for item in history if item.sequence > covered]
-        available = self._available_message_tokens(dynamic_context)
+        context_limit, compression_trigger, context_source = self._context_policy()
+        available = self._available_message_tokens(
+            dynamic_context,
+            compression_trigger_tokens=compression_trigger,
+        )
         compacted = False
 
         def fits() -> bool:
@@ -95,21 +109,13 @@ class ContextManager:
                         batch = batch[:max(1, len(batch) // 2)]
                 previous_facts = memory.exact_facts if memory else []
                 preserved = {fact.model_dump_json(): fact for fact in previous_facts}
-                sources = {item.sequence: item.content for item in batch}
                 for fact in updated.exact_facts:
                     key = fact.model_dump_json()
                     if key in preserved:
                         continue
-                    source = sources.get(fact.source_sequence, "")
-                    if (not fact.source_quote or fact.source_quote not in source
-                            or not fact.value or fact.value not in fact.source_quote
-                            or (fact.unit and fact.unit not in fact.source_quote)):
-                        raise ValueError(
-                            f"精确事实来源核对失败：消息 {fact.source_sequence}，"
-                            "引用必须逐字来自本批原文，数值和单位必须逐字存在于引用中。"
-                        )
                     preserved[key] = fact
                 updated = updated.model_copy(update={"exact_facts": list(preserved.values())})
+                updated = self._bound_memory(updated)
                 self._validate_evidence(task_id, updated)
             except Exception as exc:
                 self._emit(
@@ -140,6 +146,9 @@ class ContextManager:
             message_tokens=tokens,
             available_message_tokens=available,
             compacted=compacted,
+            context_limit_tokens=context_limit,
+            compression_trigger_tokens=compression_trigger,
+            context_limit_source=context_source,
         )
 
     def record_completed_analysis(
@@ -150,17 +159,12 @@ class ContextManager:
     ) -> None:
         record = repository.get_conversation_memory(task_id)
         memory = record.memory if record else ConversationMemory(task_goal=question)
-        evidence_ids = sorted(
-            {
-                evidence_id
-                for item in [*draft.metrics, *draft.findings]
-                for evidence_id in item.evidence_refs
-            }
-        )
+        from .report_document import evidence_ids as collect_evidence_ids, report_text
+        evidence_ids = sorted(collect_evidence_ids(draft))
         self._validate_evidence_ids(task_id, evidence_ids)
         completed = AnalysisMemory(
             question=question,
-            conclusion=draft.summary,
+            conclusion=report_text(draft),
             evidence_ids=evidence_ids,
             limitations=list(draft.warnings),
         )
@@ -174,6 +178,7 @@ class ContextManager:
                 "last_updated_at": utc_now(),
             }
         )
+        updated = self._bound_memory(updated)
         repository.save_conversation_memory(
             task_id,
             updated,
@@ -181,15 +186,37 @@ class ContextManager:
             expected_version=record.version if record else None,
         )
 
-    def _available_message_tokens(self, dynamic_context: Any) -> int:
-        safety = int(settings.model_context_tokens * settings.context_safety_ratio)
+    @staticmethod
+    def _context_policy() -> tuple[int, int, str]:
+        runtime = model_settings.get()
+        if runtime.mode == "openai_compatible":
+            policy = cloud_context_policy(runtime.model)
+            return (
+                policy.max_context_tokens,
+                policy.compression_trigger_tokens,
+                policy.source,
+            )
+
+        context_limit = (
+            runtime.context_window
+            if model_settings.path.is_file()
+            else settings.model_context_tokens
+        )
+        safety = int(context_limit * settings.context_safety_ratio)
+        return context_limit, context_limit - safety, "local"
+
+    def _available_message_tokens(
+        self,
+        dynamic_context: Any,
+        *,
+        compression_trigger_tokens: int,
+    ) -> int:
         dynamic = estimate_tokens(json.dumps(dynamic_context, ensure_ascii=False, default=str))
         return max(
             256,
-            settings.model_context_tokens
+            compression_trigger_tokens
             - settings.context_output_reserve_tokens
             - settings.context_base_overhead_tokens
-            - safety
             - dynamic,
         )
 
@@ -245,6 +272,18 @@ class ContextManager:
         unknown = set(evidence_ids) - self._evidence_ids(task_id)
         if unknown:
             raise ValueError(f"会话摘要引用了不存在的证据：{', '.join(sorted(unknown))}")
+
+    @staticmethod
+    def _bound_memory(memory: ConversationMemory) -> ConversationMemory:
+        """Keep durable memory bounded while retaining the newest information."""
+        facts = sorted(memory.exact_facts, key=lambda item: item.source_sequence)
+        analyses = memory.completed_analyses[-MAX_MEMORY_COMPLETED_ANALYSES:]
+        evidence_ids = list(dict.fromkeys(memory.referenced_evidence_ids))[-MAX_MEMORY_EVIDENCE_IDS:]
+        return memory.model_copy(update={
+            "exact_facts": facts[-MAX_MEMORY_EXACT_FACTS:],
+            "completed_analyses": analyses,
+            "referenced_evidence_ids": evidence_ids,
+        })
 
     @staticmethod
     def _emit(task_id: str, event_type: str, message: str, payload: dict[str, Any] | None = None) -> None:

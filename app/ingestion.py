@@ -335,8 +335,28 @@ def _native_table_ranges(path: Path) -> dict[str, list[str]]:
                     for r in ET.fromstring(archive.read(rel)) if r.attrib.get('TargetMode') != 'External'}
         book_rels = relations('xl/workbook.xml')
         result = {}
-        for sheet in ET.fromstring(archive.read('xl/workbook.xml')).findall('s:sheets/s:sheet', ns):
+        sheets = ET.fromstring(archive.read('xl/workbook.xml')).findall('s:sheets/s:sheet', ns)
+        if len(sheets) > settings.max_sheets:
+            raise IngestionError(
+                f"检测到 {len(sheets)} 个工作表，当前最多支持 {settings.max_sheets} 个",
+                code="sheet_count_exceeded", http_status=413,
+            )
+        total_rows = 0
+        for sheet in sheets:
             part = book_rels[sheet.attrib[rid]]
+            # Read actual row records rather than trusting worksheet dimensions.
+            sheet_rows = 0
+            with archive.open(part) as stream:
+                for _, element in ET.iterparse(stream, events=('end',)):
+                    if element.tag == f"{{{ns['s']}}}row":
+                        sheet_rows = max(sheet_rows, int(element.attrib.get('r', sheet_rows + 1)))
+                        if total_rows + sheet_rows > settings.max_rows_per_workbook:
+                            raise IngestionError(
+                                f"Excel 所有工作表总行数超过 {settings.max_rows_per_workbook} 行限制（含表头和隐藏表）",
+                                code="workbook_rows_exceeded", http_status=413,
+                            )
+                    element.clear()
+            total_rows += sheet_rows
             sheet_rels = relations(part)
             refs = []
             for target in sheet_rels.values():
@@ -395,30 +415,17 @@ def _read_sheet_regions(
     if current_band:
         vertical_bands.append(current_band)
 
-    # Financial statement sections share one header across blank separator rows.
-    financial_names = {'利润表', '资产负债表', '现金流量表', '费用明细', '应收账款', '应付账款'}
-    if worksheet.title in financial_names:
-        rows = [row for band in vertical_bands for row in band]
-        header = next((range_boundaries(ref)[1] for ref in table_ranges or []), None)
-        header = header or next((r for r, v in rows if len(v) >= 3 and
-                       any(x in v.values() for x in ('本月金额', '月末余额', '本月发生额')) and
-                       any(x in v.values() for x in ('项目', '费用项目', '客户名称', '供应商名称'))), None)
-        if header is None:
-            raise IngestionError(f'工作表“{worksheet.title}”未识别到可靠财务表头，请检查项目及金额列',
-                                 code='financial_header_invalid')
-        rows = [(r, v) for r, v in rows if r >= header]
-        width = max(rows[0][1])
-        region = _build_region(sheet_name=worksheet.title, region_index=1, rows=rows,
-                               start_column=1, end_column=width, forced_header_row=header)
-        if region:
-            source_rows = rows[1:]
-            labels = [str(v.get(1, '')).strip() for _, v in source_rows]
-            kinds = [('note' if len(v) == 1 or label.startswith(('编制', '口径', '数据说明', '测算'))
-                      else 'check' if '核对' in label else 'total' if re.search(r'合计|总计', label)
-                      else 'detail') for label, (_, v) in zip(labels, source_rows)]
-            frame = region.frame.with_columns(pl.Series('来源行号', [r for r, _ in source_rows]),
-                                               pl.Series('报表行类型', kinds))
-            return [ParsedRegion(**{**region.__dict__, 'frame': frame})]
+    # A blank separator can divide sections inside one logical table.  Merge a
+    # following band when its occupied columns align and its first row looks
+    # like data or a one-cell section label rather than a new header.  This is
+    # schema-driven and does not depend on workbook or field names.
+    merged_bands: list[list[SparseRow]] = []
+    for band in vertical_bands:
+        if merged_bands and _is_continuation_band(merged_bands[-1], band):
+            merged_bands[-1].extend(band)
+        else:
+            merged_bands.append(band)
+    vertical_bands = merged_bands
 
     result: list[ParsedRegion] = []
     for rows in vertical_bands:
@@ -437,6 +444,18 @@ def _read_sheet_regions(
             if region is not None:
                 result.append(region)
     return result
+
+
+def _is_continuation_band(previous: list[SparseRow], current: list[SparseRow]) -> bool:
+    previous_columns = {column for _, values in previous for column in values}
+    current_columns = {column for _, values in current for column in values}
+    if not previous_columns or not current_columns:
+        return False
+    if min(previous_columns) != min(current_columns) or max(previous_columns) != max(current_columns):
+        return False
+    start_column, end_column = min(current_columns), max(current_columns)
+    first_profile = _row_profile(current[0][1], start_column, end_column)
+    return first_profile["present"] == 1 or first_profile["numeric"] > 0
 
 
 def _horizontal_regions(rows: list[SparseRow]) -> list[tuple[int, int]]:

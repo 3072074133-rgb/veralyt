@@ -38,6 +38,49 @@ class Severity(StrEnum):
     ERROR = "error"
 
 
+class ModelSettings(StrictModel):
+    mode: Literal["ollama", "openai_compatible"] = "ollama"
+    provider: str = Field(default="ollama", min_length=1, max_length=60)
+    model: str = Field(min_length=1, max_length=200)
+    api_key: str = Field(default="", max_length=4096)
+    base_url: str = Field(min_length=1, max_length=1000)
+    temperature: float = Field(default=0, ge=0, le=2)
+    max_tokens: int = Field(default=3072, ge=128, le=65536)
+    context_window: int = Field(default=32768, ge=512, le=1048576)
+
+
+class ModelSettingsPublic(ModelSettings):
+    api_key_configured: bool = False
+
+
+class ModelSettingsUpdate(StrictModel):
+    mode: Literal["ollama", "openai_compatible"] | None = None
+    provider: str | None = Field(default=None, min_length=1, max_length=60)
+    model: str | None = Field(default=None, min_length=1, max_length=200)
+    api_key: str | None = Field(default=None, max_length=4096)
+    clear_api_key: bool = False
+    base_url: str | None = Field(default=None, min_length=1, max_length=1000)
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    max_tokens: int | None = Field(default=None, ge=128, le=65536)
+    context_window: int | None = Field(default=None, ge=512, le=1048576)
+
+
+class ModelConnectionResult(StrictModel):
+    success: bool
+    provider: str
+    model: str
+    message: str
+    latency_ms: int
+
+
+class ModelSettingsEnvelope(StrictModel):
+    llm: ModelSettingsPublic
+
+
+class ModelSettingsRequest(StrictModel):
+    llm: ModelSettingsUpdate
+
+
 class UploadedFile(StrictModel):
     id: str
     original_name: str
@@ -203,6 +246,8 @@ class DatasetCorrectionResult(StrictModel):
 
 
 class IntentDecision(StrictModel):
+    delivery: Literal['answer', 'report', 'clarify'] = 'answer'
+    data_action: Literal['reuse', 'query'] = 'reuse'
     route: Literal['analysis', 'clarification', 'conversation', 'explanation']
     reason: str = ''
     reply: str | None
@@ -217,72 +262,8 @@ class IntentDecision(StrictModel):
 class PlanStep(StrictModel):
     id: str
     purpose: str
-    tool: Literal[
-        "profile_table",
-        "query_data",
-        "query_financial_report",
-        "query_overdue",
-        "query_department_profit",
-    ]
-    dataset_id: str | None = None
-    dataset_ids: list[str] = Field(default_factory=list)
-    joins: list["QueryJoin"] = Field(default_factory=list)
-
-
-class QueryMeasure(StrictModel):
-    field: str
-    aggregation: Literal["sum", "average", "min", "max", "count"]
-    alias: str
-
-
-class QueryFilter(StrictModel):
-    field: str
-    operator: Literal["eq", "ne", "gt", "gte", "lt", "lte", "contains"]
-    value: str | int | float
-
-
-class QueryJoin(StrictModel):
-    right_dataset_id: str
-    left_field: str
-    right_field: str
-    join_type: Literal["inner", "left"]
-
-
-class QuerySpec(StrictModel):
-    dataset_id: str
-    dimensions: list[str] = Field(default_factory=list)
-    measures: list[QueryMeasure] = Field(default_factory=list)
-    filters: list[QueryFilter] = Field(default_factory=list)
-    order_by: str | None = None
-    descending: bool = True
-    limit: int = Field(default=100, ge=1)
-    joins: list[QueryJoin] = Field(default_factory=list)
-
-
-class DatasetQuerySpec(StrictModel):
-    dimensions: list[str] = Field(default_factory=list)
-    measures: list[QueryMeasure] = Field(default_factory=list)
-    filters: list[QueryFilter] = Field(default_factory=list)
-    order_by: str | None = None
-    descending: bool = True
-    limit: int = Field(default=100, ge=1)
-    joins: list[QueryJoin] = Field(default_factory=list)
-
-
-class QueryRequest(StrictModel):
-    query: DatasetQuerySpec
-    title: str = "查询结果"
-
-
-class QueryDecision(StrictModel):
-    """Model-selected structured query for the planner-selected dataset."""
-    dimensions: list[str]
-    measures: list[QueryMeasure]
-    filters: list[QueryFilter]
-    order_by: str | None
-    descending: bool
-    limit: int = Field(ge=1)
-    joins: list[QueryJoin]
+    dataset_ids: list[str] = Field(min_length=1)
+    sql: str = Field(min_length=1)
 
 
 class PlanDecision(StrictModel):
@@ -337,6 +318,7 @@ class ToolExecutionResult(StrictModel):
     rows: list[dict[str, Any]] = Field(default_factory=list)
     evidence_ids: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    execution_metadata: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
 
 
@@ -428,7 +410,69 @@ class DeliveryGate(StrictModel):
     issues: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class ReportText(StrictModel):
+    text: str = Field(min_length=1)
+    evidence_refs: list[str] = Field(default_factory=list)
+    evidence_pointers: list[EvidencePointer] = Field(default_factory=list)
+
+
+class ReportBlock(StrictModel):
+    id: str = Field(min_length=1)
+    kind: Literal["paragraph", "list", "metrics", "table", "chart"]
+    text: str = ""
+    items: list[ReportText] = Field(default_factory=list)
+    metrics: list[Metric] = Field(default_factory=list)
+    chart: ChartSpec | None = None
+    dataset_ref: str | None = None
+    columns: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list)
+    evidence_pointers: list[EvidencePointer] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def valid_content(self):
+        if self.kind == "paragraph" and not self.text.strip():
+            raise ValueError("paragraph requires text")
+        if self.kind == "list" and not self.items:
+            raise ValueError("list requires items")
+        if self.kind == "metrics" and not self.metrics:
+            raise ValueError("metrics requires metrics")
+        if self.kind == "chart" and self.chart is None:
+            raise ValueError("chart requires chart specification")
+        if self.kind == "table" and not self.dataset_ref:
+            raise ValueError("table requires persisted dataset_ref")
+        allowed = {"paragraph": {"text"}, "list": {"items"}, "metrics": {"metrics"},
+                   "chart": {"chart"}, "table": {"dataset_ref", "columns"}}[self.kind]
+        for field in {"text", "items", "metrics", "chart", "dataset_ref", "columns"} - allowed:
+            if getattr(self, field):
+                raise ValueError(f"{self.kind} does not render {field}; use a separate block")
+        return self
+
+
+class ReportSection(StrictModel):
+    id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    blocks: list[ReportBlock] = Field(min_length=1)
+
+
+class OutlineSection(StrictModel):
+    id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    purpose: str
+
+
+class ReportOutline(StrictModel):
+    sections: list[OutlineSection] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def unique_ids(self):
+        if len({section.id for section in self.sections}) != len(self.sections):
+            raise ValueError("outline section IDs must be unique")
+        return self
+
+
 class AnalysisDraft(StrictModel):
+    report_schema_version: Literal[1, 2] = 1
+    sections: list[ReportSection] = Field(default_factory=list)
     title: str = "数据分析结果"
     summary: str
     summary_evidence_refs: list[str] = Field(default_factory=list)
@@ -444,9 +488,30 @@ class AnalysisDraft(StrictModel):
     delivery: DeliveryGate | None = None
     verification_level: Literal["legacy", "evidence", "cell"] = "evidence"
 
+    @model_validator(mode="after")
+    def valid_sections(self):
+        if self.report_schema_version == 2:
+            if not self.sections:
+                raise ValueError("v2 report requires sections")
+            if self.metrics or self.findings or self.insights or self.charts:
+                raise ValueError("v2 body belongs exclusively in sections")
+            ids = [section.id for section in self.sections]
+            ids += [block.id for section in self.sections for block in section.blocks]
+            if len(set(ids)) != len(ids):
+                raise ValueError("section and block IDs must be unique")
+        elif self.sections:
+            raise ValueError("sections require report_schema_version=2")
+        return self
+
 
 class GeneratedAnalysisDraft(AnalysisDraft):
     """Draft returned directly by the writing model."""
+
+
+class ChapterAnalysisDraft(AnalysisDraft):
+    """New reports must use the chapter protocol; v1 remains readable."""
+    report_schema_version: Literal[2] = 2
+    sections: list[ReportSection] = Field(min_length=1)
 
 
 class ValidationIssue(StrictModel):
@@ -471,7 +536,7 @@ class ReviewIssue(StrictModel):
 
 class ReflectionDecision(StrictModel):
     verdict: Literal["pass", "revise"]
-    route: Literal["finish", "replan", "rewrite"]
+    route: Literal["finish", "replan", "rewrite", "ask_user"]
     reason: str
     issues: list[ReviewIssue] = Field(default_factory=list)
 
@@ -480,6 +545,27 @@ class ReflectionDecision(StrictModel):
         if self.verdict == "pass" and self.route != "finish":
             raise ValueError("pass requires finish")
         return self
+
+
+class ResultDecision(StrictModel):
+    action: Literal["continue", "replan", "draft", "ask_user", "answer"]
+    reason: str
+    question: str | None = None
+    answer: str | None = None
+
+    @model_validator(mode='after')
+    def require_answer(self):
+        if self.action == 'answer' and not (self.answer or '').strip():
+            raise ValueError('answer action requires a nonempty answer')
+        return self
+
+
+class ConvergenceDecision(ResultDecision):
+    """Model decision used when replanning produced no executable work."""
+
+    action: Literal["draft", "ask_user", "answer"]
+    reason: str
+    question: str | None = None
 
 
 class EvidenceRecord(StrictModel):
@@ -719,6 +805,10 @@ class AnalysisState(StrictModel):
     conversation_summary: dict[str, Any] | None = None
     conversation_messages: list[dict[str, Any]] = Field(default_factory=list)
     previous_result: dict[str, Any] | None = None
+    inherited_evidence_ids: list[str] = Field(default_factory=list)
+    data_revision: int = 0
+    result_decision: dict[str, Any] | None = None
+    decision_history: list[dict[str, Any]] = Field(default_factory=list)
     context_prepared: bool = False
     datasets: list[dict[str, Any]] = Field(default_factory=list)
     confirmed_relationships: list[dict[str, Any]] = Field(default_factory=list)
@@ -733,5 +823,6 @@ class AnalysisState(StrictModel):
     validation: dict[str, Any] | None = None
     reflection: dict[str, Any] | None = None
     revision_round: int = 0
+    citation_repair_round: int = 0
     final_status: str | None = None
     error: str | None = None

@@ -9,6 +9,80 @@ from pydantic import create_model
 
 from .llm import LLMContextOverflowError, LLMStructuredOutputError, LLMOutputTruncatedError, _estimate_tokens
 from .config import settings
+from .models import ChapterAnalysisDraft, EvidencePointer, ReportOutline, ReportSection, StrictModel
+from pydantic import Field, ValidationError
+
+
+class ReportIntroduction(StrictModel):
+    title: str
+    summary: str
+    summary_evidence_pointers: list[EvidencePointer] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    suggested_questions: list[str] = Field(default_factory=list)
+
+
+def generate_chapter_report(gateway, context, **options):
+    context = deepcopy(context)
+    catalog = context.get('evidence_catalog', [])
+    for key in ('previous_draft', 'previous_result'):
+        if context.get(key):
+            context[key] = model_citation_context(context[key], catalog)
+    context['evidence_catalog'] = model_evidence_catalog(catalog)
+    prompt = (options.get('prompt_override') or gateway.load_prompt('draft_writer')) + CITATION_MODEL_RULE
+    options = {key: value for key, value in options.items()
+               if key not in {'prompt_override', 'ignored_response_fields', 'output_tokens', 'stop_on_length'}}
+    notify = options.get('diagnostics') or (lambda value: None)
+
+    def call(model, payload, instruction, tokens=6144, check=None):
+        for attempt in range(3):
+            try:
+                result = gateway.structured('draft_writer', payload, model, **options,
+                    prompt_override=prompt + '\n' + instruction, output_tokens=tokens, stop_on_length=True)
+                result = model.model_validate(result.model_dump(mode='json'))
+                if check:
+                    check(result)
+                return result
+            except (ValidationError, ValueError, LLMStructuredOutputError) as exc:
+                if attempt == 2:
+                    raise
+                payload = {**payload, 'structure_repair': str(exc)[:2000]}
+        raise ValueError('Report structure repair exhausted')
+
+    notify({'progress_message': '正在组织报告章节'})
+    outline = call(ReportOutline, context,
+        '当前只生成章节大纲。用户指定标题和顺序时逐项遵循；未指定时自主组织。'
+        '大纲不是摘要，禁止使用固定通用模板替代用户要求。修改旧报告时保留无关章节ID。'
+        '每章给出唯一id、title、purpose；正文内容稍后生成。', 1536)
+    context['report_outline'] = outline.model_dump(mode='json')
+
+    def check_order(draft):
+        if [(s.id, s.title) for s in draft.sections] != [(s.id, s.title) for s in outline.sections]:
+            raise ValueError('Sections must exactly follow report_outline IDs, titles and order')
+
+    instruction = ('生成完整v2报告。sections严格遵循report_outline；每章用blocks组织正文。'
+                   'summary只写简短概述，不复制章节正文。不要输出旧metrics/findings/insights/charts顶层字段。')
+    notify({'progress_message': '正在撰写报告正文'})
+    try:
+        return call(ChapterAnalysisDraft, context, instruction, check=check_order)
+    except (LLMContextOverflowError, LLMOutputTruncatedError):
+        pass
+    intro = call(ReportIntroduction, context, '仅生成标题、简短摘要、摘要引用、假设、风险和后续问题，不生成正文。', 3072)
+    sections = []
+    for index, target in enumerate(outline.sections):
+        notify({'progress_message': f'正在撰写章节（{index + 1}/{len(outline.sections)}）：{target.title}'})
+        def check_section(section):
+            if (section.id, section.title) != (target.id, target.title):
+                raise ValueError('Section ID and title must match current_section')
+        payload = {**context, 'current_section': target.model_dump(mode='json'),
+                   'report_introduction': intro.model_dump(mode='json'),
+                   'completed_sections': [section.model_dump(mode='json') for section in sections]}
+        sections.append(call(ReportSection, payload,
+            '仅生成current_section指定章节。完整大纲和前文章节用于保持一致，禁止重复其他章节。'
+            '保留证据引用，blocks的ID在整篇报告内唯一。', check=check_section))
+    result = ChapterAnalysisDraft(**intro.model_dump(mode='json'), sections=sections)
+    check_order(result)
+    return result
 
 
 REPORT_BLOCKS = (
@@ -23,6 +97,57 @@ REPORT_BLOCKS = (
 def citation_id(evidence_id, row_index, field, value):
     encoded = json.dumps([evidence_id, row_index, field, str(value)], ensure_ascii=False).encode()
     return 'cite_' + hashlib.sha256(encoded).hexdigest()[:24]
+
+
+def model_evidence_catalog(catalog):
+    """Lossless column-oriented row encoding shared by all model nodes."""
+    result = deepcopy(catalog)
+    for evidence in result:
+        if 'row_format' in evidence or any(not isinstance(row, dict) or 'cells' not in row for row in evidence['rows']):
+            continue
+        source_fields = {key for row in evidence['rows'] for key in row['source_location_not_row_index']}
+        evidence['columns'] = [key for key in evidence['columns'] if key not in source_fields]
+        evidence['citation_rule'] = 'Select citation_id from the same column as the value. Only citation_id identifies evidence; never infer or output row coordinates.'
+        evidence['row_format'] = ['values_in_column_order', 'citation_ids_in_column_order', 'missing_column_indexes']
+        encoded = []
+        for row in evidence['rows']:
+            cells = row['cells']
+            encoded.append([
+                [cells.get(field) for field in evidence['columns']],
+                [row['value_pointers'].get(field, {}).get('citation_id') for field in evidence['columns']],
+                [index for index, field in enumerate(evidence['columns']) if field not in cells],
+            ])
+        evidence['rows'] = encoded
+    return result
+
+
+def model_citation_context(value, catalog):
+    """Keep backend coordinates out of model-facing drafts; retain business values."""
+    lookup = {(p['evidence_id'], p['row_index'], p['field'], p['raw_value']): p['citation_id']
+              for evidence in catalog for row in evidence['rows'] if isinstance(row, dict)
+              for p in row.get('value_pointers', {}).values()}
+    def visit(item):
+        if isinstance(item, list):
+            return [visit(child) for child in item]
+        if not isinstance(item, dict):
+            return item
+        if 'citation_id' in item or {'evidence_id', 'row_index', 'field', 'raw_value'} <= item.keys():
+            cid = item.get('citation_id') or lookup.get((item.get('evidence_id'), item.get('row_index'), item.get('field'), str(item.get('raw_value'))))
+            return {**{key: visit(child) for key, child in item.items()
+                       if key not in {'evidence_id', 'row_index', 'field', 'raw_value', 'citation_id'}},
+                    'citation_id': cid or 'unresolved_citation'}
+        return {key: visit(child) for key, child in item.items()}
+    return visit(value)
+
+
+CITATION_MODEL_RULE = (
+    '\n若工具结果标记 error，该步骤未完成。使用成功证据给出可支持的部分结论，在 warnings 说明缺口；不得假装完整核对通过。复核允许明确披露缺口的部分报告，不能仅因已披露的查询失败要求循环补查；缺乏证据的结论仍须修正。'
+    '\n引用协议：证据目录采用 values_in_column_order 和 citation_ids_in_column_order。'
+    '仅使用同列 citation_id 标识引用；不要输出或评判 row_index、Excel 行号或数组位置。'
+    '定位信息由程序解析和校验。依据同一行的业务名称、期间、单位和数值判断证据是否支持结论，'
+    '不得将合计当作客户明细。修正意见指向报告字段并给出正确 citation_id。'
+    '本协议替代旧提示中复制 value_pointers 或核对行号的要求。'
+)
 
 
 def resolve_citations(draft, catalog):
@@ -52,6 +177,11 @@ def resolve_citations(draft, catalog):
 
 def revision_fields(context, fields):
     feedback = context.get('revision_feedback') or {}
+    # Model review may require coordinated changes across summary, findings,
+    # insights and recommendations. Let the writer return the complete report
+    # instead of deriving a section restriction from issue targets.
+    if (feedback.get('review') or {}).get('issues'):
+        return None
     issues = [*(feedback.get('review') or {}).get('issues', []),
               *(feedback.get('structural_validation') or {}).get('issues', [])]
     if not context.get('previous_draft') or not issues:
@@ -91,6 +221,9 @@ def compact_evidence(item):
         })
     return {
         'id': item.id, 'title': item.title, 'source': item.source,
+        'data_revision': getattr(item, 'data_revision', None),
+        'source_revision_ids': getattr(item, 'source_revision_ids', []),
+        'run_id': getattr(item, 'run_id', None), 'query': getattr(item, 'query', None),
         'columns': columns, 'row_count': len(item.rows),
         'citation_rule': (
             'Copy a complete object from rows[].value_pointers for a quantitative evidence pointer. '
@@ -111,22 +244,21 @@ def _is_numeric_value(value: Any) -> bool:
 
 
 def generate_report(gateway, prompt_name, context, response_model, **kwargs):
+    if response_model is ChapterAnalysisDraft:
+        return generate_chapter_report(gateway, context, **kwargs)
     context = deepcopy(context)
+    catalog = context.get('evidence_catalog', [])
+    for key in ('previous_draft', 'previous_result'):
+        if context.get(key):
+            context[key] = model_citation_context(context[key], catalog)
+    kwargs['prompt_override'] = (kwargs.get('prompt_override') or gateway.load_prompt(prompt_name)) + CITATION_MODEL_RULE
     # The registry resolves coordinates after generation; only IDs and original
     # cells are needed in model input, avoiding duplicated values and offsets.
-    for evidence in context.get('evidence_catalog', []):
-        if any(not isinstance(row, dict) or 'value_pointers' not in row for row in evidence['rows']):
-            continue
-        evidence['rows'] = [
-            {'row_index': row['row_index'], 'cells': row['cells'], 'source_location_not_row_index': row['source_location_not_row_index'],
-             'value_pointers': {field: {'citation_id': pointer['citation_id']}
-                                for field, pointer in row['value_pointers'].items()}}
-            for row in evidence['rows']
-        ]
+    context['evidence_catalog'] = model_evidence_catalog(context.get('evidence_catalog', []))
     notify = kwargs.get('diagnostics') or (lambda value: None)
     notify({'progress_message': '正在整理分析上下文'})
     ignored = kwargs.get('ignored_response_fields', set())
-    fields = set(response_model.model_fields) - ignored
+    fields = set(response_model.model_fields) - ignored - {'report_schema_version', 'sections'}
     targets = revision_fields(context, fields)
     feedback = (context.get('revision_feedback') or {}).get('structural_validation') or {}
     issues = feedback.get('issues', [])
@@ -153,16 +285,6 @@ def generate_report(gateway, prompt_name, context, response_model, **kwargs):
                 repair_context = {**context, 'repair_target': target, 'previous_draft': old,
                                   'repair_instruction': '仅返回该结论对象。优先选择 citation_id 修复引用，不改动有效事实。无法支持原结论时修改该结论以忠实反映证据，禁止猜测坐标。'}
                 repair_context['previous_invalid_citations'] = old.get('evidence_pointers', old.get('summary_evidence_pointers', []))
-                repair_context['evidence_catalog'] = [
-                    {**{key: value for key, value in evidence.items() if key != 'rows'},
-                     'row_format': ['cells_in_column_order', 'citation_ids_in_column_order', 'source_location'],
-                     'rows': [[
-                         [row['cells'].get(field) for field in evidence['columns']],
-                         [row['value_pointers'].get(field, {}).get('citation_id') for field in evidence['columns']],
-                         row['source_location_not_row_index'],
-                     ] for row in evidence['rows']]}
-                    for evidence in context.get('evidence_catalog', [])
-                ]
                 options = {**kwargs, 'ignored_response_fields': set()}
                 options['output_tokens'] = 1536
                 options['prompt_override'] = (kwargs.get('prompt_override') or gateway.load_prompt(prompt_name)) + '\n当前是局部修复，仅输出 repair_target 对应对象，遵守本次 Schema。不得输出完整报告。'

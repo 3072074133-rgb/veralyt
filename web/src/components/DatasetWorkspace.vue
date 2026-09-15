@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
-import { ClientSideRowModelModule, ModuleRegistry, type CellValueChangedEvent, type ColDef, type GridApi, type GridReadyEvent } from 'ag-grid-community'
+import { AllCommunityModule, ModuleRegistry, type CellValueChangedEvent, type ColDef, type GridApi, type GridReadyEvent } from 'ag-grid-community'
 import { AgGridVue } from 'ag-grid-vue3'
-import { ChevronLeft, ChevronRight, Plus, Save, Trash2, X } from 'lucide-vue-next'
+import 'ag-grid-community/styles/ag-grid.css'
+import 'ag-grid-community/styles/ag-theme-quartz.css'
+import { ChevronLeft, ChevronRight, Plus, Save, Trash2, X, Pencil } from 'lucide-vue-next'
 import { ElMessage } from 'element-plus'
 import { api } from '../api'
 import type { DatasetCorrectionRequest, DatasetInfo, DatasetPreview, DatasetProfile } from '../types'
 
-ModuleRegistry.registerModules([ClientSideRowModelModule])
+ModuleRegistry.registerModules([AllCommunityModule])
 
 const props = defineProps<{ open: boolean; taskId?: string; datasets: DatasetInfo[]; initialDatasetId?: string; running?: boolean }>()
 const emit = defineEmits<{ close: []; published: [] }>()
@@ -35,7 +37,9 @@ const columnDefs = computed<ColDef[]>(() => [
   ...(preview.value?.columns ?? []).map((column) => ({
     field: column.name,
     headerName: column.display_name,
-    editable: !props.running,
+    editable: !props.running && !saving.value,
+    cellEditor: 'agTextCellEditor',
+    cellDataType: false,
     sortable: true,
     filter: true,
     resizable: true,
@@ -107,6 +111,18 @@ function onCellChanged(event: CellValueChangedEvent) {
     cellUpdates.value.set(key, { row_id: row.__row_id, column, value: event.newValue })
   }
 }
+function editSelected() {
+  const api = gridApi.value
+  if (!api || props.running || saving.value) return
+  const focus = api.getFocusedCell()
+  const rowIndex = api.getSelectedNodes()[0]?.rowIndex ?? focus?.rowIndex ?? 0
+  const colKey = focus?.column.getColId() !== '__row_id' ? focus?.column.getColId() : undefined
+  const field = colKey ?? preview.value?.columns[0]?.name
+  if (!field || !api.getDisplayedRowAtIndex(rowIndex)) return
+  api.ensureIndexVisible(rowIndex)
+  api.setFocusedCell(rowIndex, field)
+  api.startEditingCell({ rowIndex, colKey: field })
+}
 function addRow() {
   const row = Object.fromEntries((preview.value?.columns ?? []).map((column) => [column.name, null])) as Record<string, unknown> & {__local_id: string}
   row.__local_id = crypto.randomUUID()
@@ -121,6 +137,7 @@ function deleteRows() {
 }
 
 async function publish() {
+  gridApi.value?.stopEditing()
   if (!props.taskId || !preview.value || !dirtyCount.value) return
   saving.value = true
   try {
@@ -172,8 +189,8 @@ async function publish() {
         <div class="dataset-tabs" role="tablist"><button v-for="item in [['preview','数据'],['columns','字段'],['profile','质量']]" :key="item[0]" :class="{active: tab === item[0]}" @click="tab = item[0] as typeof tab">{{ item[1] }}</button></div>
       </div>
       <div v-if="tab === 'preview'" class="dataset-preview-pane">
-        <div class="dataset-grid-actions"><span>{{ preview?.total.toLocaleString() ?? 0 }} 行 · 第 {{ page }}/{{ totalPages }} 页</span><div><button class="button" :disabled="running" @click="addRow"><Plus :size="15" />新增行</button><button class="button" :disabled="running" @click="deleteRows"><Trash2 :size="15" />删除所选</button></div></div>
-        <AgGridVue class="ag-theme-quartz correction-grid" :loading="loading" :column-defs="columnDefs" :row-data="rowData" :row-selection="{mode: 'multiRow'}" :undo-redo-cell-editing="true" @grid-ready="onGridReady" @cell-value-changed="onCellChanged" />
+        <div class="dataset-grid-actions"><span>{{ preview?.total.toLocaleString() ?? 0 }} 行 · 第 {{ page }}/{{ totalPages }} 页</span><div><button class="button" :disabled="running || saving || loading || !rowData.length" @click="editSelected"><Pencil :size="15" />编辑所选</button><button class="button" :disabled="running || saving" @click="addRow"><Plus :size="15" />新增行</button><button class="button" :disabled="running || saving" @click="deleteRows"><Trash2 :size="15" />删除所选</button></div></div>
+        <AgGridVue class="ag-theme-quartz correction-grid" theme="legacy" :loading="loading" :column-defs="columnDefs" :row-data="rowData" :row-selection="{mode: 'multiRow'}" :single-click-edit="true" :stop-editing-when-cells-lose-focus="true" :undo-redo-cell-editing="true" @grid-ready="onGridReady" @cell-value-changed="onCellChanged" />
         <footer><button class="icon-button" title="上一页" :disabled="page <= 1 || dirtyCount > 0" @click="movePage(-1)"><ChevronLeft :size="18" /></button><span>{{ page }} / {{ totalPages }}</span><button class="icon-button" title="下一页" :disabled="page >= totalPages || dirtyCount > 0" @click="movePage(1)"><ChevronRight :size="18" /></button></footer>
       </div>
       <div v-else-if="tab === 'columns'" class="column-editor">

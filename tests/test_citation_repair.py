@@ -46,7 +46,7 @@ def test_last_repair_runs_and_is_validated():
     state.validation = {'passed': True}
     assert route_validation(state) == 'reflect'
     state.validation = {'passed': False}
-    assert route_validation(state) == 'finish'
+    assert route_validation(state) == 'reflect'
 
 
 def test_local_repair_preserves_other_claims():

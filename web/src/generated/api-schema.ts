@@ -4,6 +4,41 @@
  */
 
 export interface paths {
+    "/api/v1/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Model Settings */
+        get: operations["get_model_settings_api_v1_settings_get"];
+        /** Update Model Settings */
+        put: operations["update_model_settings_api_v1_settings_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/settings/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Test Model Connection */
+        post: operations["test_model_connection_api_v1_settings_test_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/tasks": {
         parameters: {
             query?: never;
@@ -17,6 +52,23 @@ export interface paths {
         /** Create Task */
         post: operations["create_task_api_v1_tasks_post"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tasks/{task_id}/files/{file_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Remove Task File */
+        delete: operations["remove_task_file_api_v1_tasks__task_id__files__file_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -69,6 +121,23 @@ export interface paths {
         post?: never;
         /** Delete Task */
         delete: operations["delete_task_api_v1_tasks__task_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tasks/{task_id}/runs/{run_id}/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Retry Analysis */
+        post: operations["retry_analysis_api_v1_tasks__task_id__runs__run_id__retry_post"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -173,6 +242,23 @@ export interface paths {
         post?: never;
         /** Delete Dataset */
         delete: operations["delete_dataset_api_v1_datasets__dataset_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/datasets/{dataset_id}/revisions/{revision_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete Dataset Revision */
+        delete: operations["delete_dataset_revision_api_v1_datasets__dataset_id__revisions__revision_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -417,6 +503,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/reports/{report_id}/versions/{version_id}/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Preview Report Version
+         * @description Serve the immutable published snapshot without opening its source task.
+         */
+        get: operations["preview_report_version_api_v1_reports__report_id__versions__version_id__preview_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/health": {
         parameters: {
             query?: never;
@@ -440,6 +546,14 @@ export interface components {
     schemas: {
         /** AnalysisDraft */
         AnalysisDraft: {
+            /**
+             * Report Schema Version
+             * @default 1
+             * @enum {integer}
+             */
+            report_schema_version: 1 | 2;
+            /** Sections */
+            sections?: components["schemas"]["ReportSection"][];
             /**
              * Title
              * @default 数据分析结果
@@ -1104,10 +1218,126 @@ export interface components {
             /** Evidence Pointers */
             evidence_pointers?: components["schemas"]["EvidencePointer"][];
         };
+        /** ModelConnectionResult */
+        ModelConnectionResult: {
+            /** Success */
+            success: boolean;
+            /** Provider */
+            provider: string;
+            /** Model */
+            model: string;
+            /** Message */
+            message: string;
+            /** Latency Ms */
+            latency_ms: number;
+        };
+        /** ModelSettingsEnvelope */
+        ModelSettingsEnvelope: {
+            llm: components["schemas"]["ModelSettingsPublic"];
+        };
+        /** ModelSettingsPublic */
+        ModelSettingsPublic: {
+            /**
+             * Mode
+             * @default ollama
+             * @enum {string}
+             */
+            mode: "ollama" | "openai_compatible";
+            /**
+             * Provider
+             * @default ollama
+             */
+            provider: string;
+            /** Model */
+            model: string;
+            /**
+             * Api Key
+             * @default
+             */
+            api_key: string;
+            /** Base Url */
+            base_url: string;
+            /**
+             * Temperature
+             * @default 0
+             */
+            temperature: number;
+            /**
+             * Max Tokens
+             * @default 3072
+             */
+            max_tokens: number;
+            /**
+             * Context Window
+             * @default 32768
+             */
+            context_window: number;
+            /**
+             * Api Key Configured
+             * @default false
+             */
+            api_key_configured: boolean;
+        };
+        /** ModelSettingsRequest */
+        ModelSettingsRequest: {
+            llm: components["schemas"]["ModelSettingsUpdate"];
+        };
+        /** ModelSettingsUpdate */
+        ModelSettingsUpdate: {
+            /** Mode */
+            mode?: ("ollama" | "openai_compatible") | null;
+            /** Provider */
+            provider?: string | null;
+            /** Model */
+            model?: string | null;
+            /** Api Key */
+            api_key?: string | null;
+            /**
+             * Clear Api Key
+             * @default false
+             */
+            clear_api_key: boolean;
+            /** Base Url */
+            base_url?: string | null;
+            /** Temperature */
+            temperature?: number | null;
+            /** Max Tokens */
+            max_tokens?: number | null;
+            /** Context Window */
+            context_window?: number | null;
+        };
         /** RelationshipConfirmationRequest */
         RelationshipConfirmationRequest: {
             /** Relationships */
             relationships?: components["schemas"]["DatasetRelationship"][];
+        };
+        /** ReportBlock */
+        ReportBlock: {
+            /** Id */
+            id: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "paragraph" | "list" | "metrics" | "table" | "chart";
+            /**
+             * Text
+             * @default
+             */
+            text: string;
+            /** Items */
+            items?: components["schemas"]["ReportText"][];
+            /** Metrics */
+            metrics?: components["schemas"]["Metric"][];
+            chart?: components["schemas"]["ChartSpec"] | null;
+            /** Dataset Ref */
+            dataset_ref?: string | null;
+            /** Columns */
+            columns?: string[];
+            /** Evidence Refs */
+            evidence_refs?: string[];
+            /** Evidence Pointers */
+            evidence_pointers?: components["schemas"]["EvidencePointer"][];
         };
         /** ReportDetail */
         ReportDetail: {
@@ -1162,6 +1392,15 @@ export interface components {
             /** Updated At */
             updated_at: string;
         };
+        /** ReportSection */
+        ReportSection: {
+            /** Id */
+            id: string;
+            /** Title */
+            title: string;
+            /** Blocks */
+            blocks: components["schemas"]["ReportBlock"][];
+        };
         /** ReportSummary */
         ReportSummary: {
             /** Id */
@@ -1181,6 +1420,15 @@ export interface components {
             created_at: string;
             /** Updated At */
             updated_at: string;
+        };
+        /** ReportText */
+        ReportText: {
+            /** Text */
+            text: string;
+            /** Evidence Refs */
+            evidence_refs?: string[];
+            /** Evidence Pointers */
+            evidence_pointers?: components["schemas"]["EvidencePointer"][];
         };
         /** ReportVersion */
         ReportVersion: {
@@ -1451,6 +1699,92 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    get_model_settings_api_v1_settings_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelSettingsEnvelope"];
+                };
+            };
+        };
+    };
+    update_model_settings_api_v1_settings_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ModelSettingsRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelSettingsEnvelope"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    test_model_connection_api_v1_settings_test_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ModelSettingsRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelConnectionResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_tasks_api_v1_tasks_get: {
         parameters: {
             query?: {
@@ -1501,6 +1835,38 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CreateTaskResponse"];
+                };
+            };
+        };
+    };
+    remove_task_file_api_v1_tasks__task_id__files__file_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                task_id: string;
+                file_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSnapshot"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -1625,6 +1991,38 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    retry_analysis_api_v1_tasks__task_id__runs__run_id__retry_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                task_id: string;
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskSnapshot"];
+                };
             };
             /** @description Validation Error */
             422: {
@@ -1888,9 +2286,41 @@ export interface operations {
             };
         };
     };
-    analyze_dataset_revision_api_v1_datasets__dataset_id__revisions__revision_id__tasks_post: {
+    delete_dataset_revision_api_v1_datasets__dataset_id__revisions__revision_id__delete: {
         parameters: {
             query?: never;
+            header?: never;
+            path: {
+                dataset_id: string;
+                revision_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    analyze_dataset_revision_api_v1_datasets__dataset_id__revisions__revision_id__tasks_post: {
+        parameters: {
+            query?: {
+                editing?: boolean;
+            };
             header?: never;
             path: {
                 dataset_id: string;
@@ -2315,6 +2745,38 @@ export interface operations {
         };
     };
     download_report_version_api_v1_reports__report_id__versions__version_id__download_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                report_id: string;
+                version_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    preview_report_version_api_v1_reports__report_id__versions__version_id__preview_get: {
         parameters: {
             query?: never;
             header?: never;

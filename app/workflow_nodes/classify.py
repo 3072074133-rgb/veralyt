@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 from ..llm import llm, _select_context, LLMContextOverflowError
 from ..context_manager import context_manager
+from ..model_settings import model_settings
 from ..models import AnalysisState, IntentDecision, MessageRecord
 from ..node_logging import start_node
 from ..repository import repository
@@ -30,11 +31,21 @@ def classify_node(state: AnalysisState) -> dict[str, Any]:
                 except LLMContextOverflowError:
                     return False
 
+            runtime = model_settings.get()
+            cloud_dynamic_context = None
+            fit_check = fits
+            if runtime.mode == "openai_compatible":
+                fit_check = None
+                cloud_dynamic_context = {
+                    "system_prompt": tracker.prompt.content,
+                    **{key: value for key, value in model_context.items() if key != "conversation_context"},
+                }
             conversation, _ = context_manager.prepare(
                 state.task_id,
                 [MessageRecord.model_validate(item) for item in state.conversation_messages],
                 current_question=state.user_question,
-                fits_context=fits,
+                dynamic_context=cloud_dynamic_context,
+                fits_context=fit_check,
             )
             model_context['conversation_context'] = conversation.model_dump(mode='json')
         decision = llm.structured(

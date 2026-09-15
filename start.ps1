@@ -27,6 +27,17 @@ $OllamaModel = Get-ConfiguredValue "ANALYSE_AGENT_OLLAMA_MODEL" "qwen3.5:4b"
 $OllamaFlashAttention = Get-ConfiguredValue "OLLAMA_FLASH_ATTENTION" "1"
 $OllamaKvCacheType = Get-ConfiguredValue "OLLAMA_KV_CACHE_TYPE" "q8_0"
 $OllamaNumParallel = Get-ConfiguredValue "OLLAMA_NUM_PARALLEL" "1"
+$ModelSettingsFile = Join-Path $ProjectDir "data\model-settings.json"
+$UseCloudModel = $false
+if (Test-Path -LiteralPath $ModelSettingsFile) {
+    try {
+        $runtimeModelSettings = Get-Content -LiteralPath $ModelSettingsFile -Raw | ConvertFrom-Json
+        $UseCloudModel = $runtimeModelSettings.mode -eq "openai_compatible"
+    }
+    catch {
+        Write-Warning "The saved model settings could not be read; falling back to the configured Ollama model."
+    }
+}
 Set-Location -LiteralPath $ProjectDir
 
 function Test-TcpPort {
@@ -106,36 +117,42 @@ function Get-OllamaModels {
     }
 }
 
-$ollamaModels = Get-OllamaModels
-if (-not $ollamaModels) {
-    $ollamaUri = [Uri]$OllamaHost
-    $isLocalOllama = $ollamaUri.Host -in @("127.0.0.1", "localhost", "::1")
-    if ($isLocalOllama) {
-        $ollamaCommandInfo = Get-Command ollama -ErrorAction SilentlyContinue
-        if (-not $ollamaCommandInfo) {
-            throw "Ollama is not responding at $OllamaHost and the local ollama command was not found."
-        }
-        Write-Host "Starting the local Ollama service..." -ForegroundColor Cyan
-        $env:OLLAMA_FLASH_ATTENTION = $OllamaFlashAttention
-        $env:OLLAMA_KV_CACHE_TYPE = $OllamaKvCacheType
-        $env:OLLAMA_NUM_PARALLEL = $OllamaNumParallel
-        Start-Process -FilePath $ollamaCommandInfo.Source -ArgumentList "serve" -WindowStyle Hidden | Out-Null
-        for ($attempt = 0; $attempt -lt 20 -and -not $ollamaModels; $attempt++) {
-            Start-Sleep -Milliseconds 500
-            $ollamaModels = Get-OllamaModels
+$ollamaModels = $null
+if (-not $UseCloudModel) {
+    $ollamaModels = Get-OllamaModels
+    if (-not $ollamaModels) {
+        $ollamaUri = [Uri]$OllamaHost
+        $isLocalOllama = $ollamaUri.Host -in @("127.0.0.1", "localhost", "::1")
+        if ($isLocalOllama) {
+            $ollamaCommandInfo = Get-Command ollama -ErrorAction SilentlyContinue
+            if (-not $ollamaCommandInfo) {
+                throw "Ollama is not responding at $OllamaHost and the local ollama command was not found."
+            }
+            Write-Host "Starting the local Ollama service..." -ForegroundColor Cyan
+            $env:OLLAMA_FLASH_ATTENTION = $OllamaFlashAttention
+            $env:OLLAMA_KV_CACHE_TYPE = $OllamaKvCacheType
+            $env:OLLAMA_NUM_PARALLEL = $OllamaNumParallel
+            Start-Process -FilePath $ollamaCommandInfo.Source -ArgumentList "serve" -WindowStyle Hidden | Out-Null
+            for ($attempt = 0; $attempt -lt 20 -and -not $ollamaModels; $attempt++) {
+                Start-Sleep -Milliseconds 500
+                $ollamaModels = Get-OllamaModels
+            }
         }
     }
-}
 
-if (-not $ollamaModels) {
-    throw "Cannot start or connect to the configured Ollama service at $OllamaHost."
-}
+    if (-not $ollamaModels) {
+        throw "Cannot start or connect to the configured Ollama service at $OllamaHost."
+    }
 
-$hasModel = $ollamaModels.models | Where-Object {
-    $_.name -eq $OllamaModel -or $_.model -eq $OllamaModel
+    $hasModel = $ollamaModels.models | Where-Object {
+        $_.name -eq $OllamaModel -or $_.model -eq $OllamaModel
+    }
+    if (-not $hasModel) {
+        throw "The configured model $OllamaModel is missing. Run: ollama pull $OllamaModel"
+    }
 }
-if (-not $hasModel) {
-    throw "The configured model $OllamaModel is missing. Run: ollama pull $OllamaModel"
+else {
+    Write-Host "Using the saved cloud model configuration; skipping the Ollama startup check." -ForegroundColor Cyan
 }
 if (-not (Test-Path -LiteralPath $PythonPath)) {
     if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {

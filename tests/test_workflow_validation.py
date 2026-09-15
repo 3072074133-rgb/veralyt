@@ -10,7 +10,6 @@ from app.models import (
 )
 from app.llm import LLMStructuredOutputError
 from app.workflow import (
-    _query_spec_from_arguments,
     route_intent,
     route_plan,
     route_reflection,
@@ -29,8 +28,10 @@ def _reflection_tracker() -> SimpleNamespace:
 
 def test_failed_validation_is_reviewed_by_model(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("app.workflow.repository.update_task", lambda *args, **kwargs: None)
+    monkeypatch.setattr("app.workflow.repository.add_artifact", lambda *args, **kwargs: None)
     monkeypatch.setattr("app.workflow.start_node", lambda *args, **kwargs: _reflection_tracker())
-    reviewer = SimpleNamespace(model_dump=lambda **kwargs: {
+    from app.models import ReflectionDecision
+    reviewer = ReflectionDecision.model_validate({
         "verdict": "revise",
         "route": "rewrite",
         "reason": "修复证据引用",
@@ -77,51 +78,6 @@ def test_reflection_schema_error_is_not_overridden(
 
     with pytest.raises(LLMStructuredOutputError):
         reflect_node(state)
-
-
-def test_query_arguments_preserve_model_query() -> None:
-    spec = _query_spec_from_arguments(
-        {"query": {
-            "dataset_id": "dataset",
-            "dimensions": ["部门"],
-            "measures": [{"field": "营业收入", "aggregation": "sum", "alias": "营业收入合计"}],
-            "limit": 100,
-        }},
-    )
-    assert spec.dataset_id == "dataset"
-    assert spec.measures[0].field == "营业收入"
-    assert spec.measures[0].aggregation == "sum"
-
-
-def test_query_arguments_preserve_model_order_expression() -> None:
-    spec = _query_spec_from_arguments(
-        {"query": {
-            "dataset_id": "dataset",
-            "dimensions": ["Department"],
-            "measures": [{"field": "Sum", "aggregation": "sum", "alias": "盈亏总额"}],
-            "order_by": "Sum",
-            "limit": 100,
-        }},
-    )
-
-    assert spec.order_by == "Sum"
-
-
-def test_query_arguments_preserve_model_choice_not_to_sort() -> None:
-    spec = _query_spec_from_arguments(
-        {"query": {
-            "dataset_id": "dataset",
-            "dimensions": [],
-            "measures": [{"field": "金额", "aggregation": "sum", "alias": "金额合计"}],
-            "order_by": None,
-            "descending": False,
-            "filters": [],
-            "joins": [],
-            "limit": 100,
-        }},
-    )
-
-    assert spec.order_by is None
 
 
 def test_workflow_routes_cover_terminal_and_revision_branches() -> None:
