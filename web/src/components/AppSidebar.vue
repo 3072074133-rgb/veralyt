@@ -30,7 +30,7 @@ async function newTask() {
 <template>
   <aside class="sidebar">
     <button class="icon-button sidebar-toggle" :title="collapsed ? '展开侧边栏' : '收起侧边栏'" :aria-label="collapsed ? '展开侧边栏' : '收起侧边栏'" :aria-expanded="!collapsed" @click="$emit('toggle')"><PanelLeftOpen v-if="collapsed" :size="19" /><PanelLeftClose v-else :size="19" /></button>
-    <div class="brand"><div class="brand-mark">DA</div><strong>数据分析智能体</strong></div>
+    <div class="brand"><div class="brand-mark">V</div><strong>Veralyt</strong></div>
     <button class="new-task" type="button" title="新建分析" aria-label="新建分析" @click="newTask"><Plus :size="17" /><span>新建分析</span></button>
     <p class="side-label">工作区</p>
     <router-link class="nav-item" :to="currentAnalysisPath" title="当前分析" aria-label="当前分析"><BarChart3 :size="17" /><span>当前分析</span></router-link>

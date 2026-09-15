@@ -11,7 +11,7 @@ class Settings(BaseSettings):
         env_prefix="ANALYSE_AGENT_", env_file=PROJECT_ROOT / ".env", extra="ignore"
     )
 
-    app_name: str = "数据分析智能体"
+    app_name: str = "Veralyt"
     api_prefix: str = "/api/v1"
     host: str = "127.0.0.1"
     port: int = 8000

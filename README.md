@@ -1,125 +1,201 @@
-# 数据分析智能体
+# Veralyt
 
-上下文更新（2026-09-15）：默认请求为 32,768 tokens，最大按需升级容量为 49,152 tokens。RTX 4060 Laptop 8GB 已验证 40,328 tokens 输入的首尾标记读取，显存约 5.4GB；这不代表复杂财务推理准确率保证。查询后由模型决定继续、补查、写报告或询问用户，最终报告由模型审核；模型认可后后端直接交付。
+> **Analytics you can verify.** 让每个数据结论都能回到原始证据。
 
-面向普通财务人员的表格分析工具。上传 `.xlsx` 或 `.csv`，输入自然语言需求，系统可以通过本地 Ollama 或用户配置的 OpenAI 兼容云端模型完成规划、计算、证据核验和报告生成。
+[![CI](https://github.com/3072074133-rgb/veralyt/actions/workflows/ci.yml/badge.svg)](https://github.com/3072074133-rgb/veralyt/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-black.svg)](LICENSE)
+[![Python 3.13+](https://img.shields.io/badge/Python-3.13%2B-3776AB.svg)](pyproject.toml)
+[![Vue 3](https://img.shields.io/badge/Vue-3-42b883.svg)](web/package.json)
 
-## 启动
+Veralyt 是一个本地优先、证据可追溯的表格分析智能体。上传 Excel 或 CSV，用自然语言描述问题，系统会规划查询、执行只读计算、核验结果并生成带证据引用的结构化报告。
 
-最简单的方式是双击项目根目录的 `start.cmd`。也可以在 PowerShell 中运行：
+项目面向财务和经营分析场景，既可使用本地 Ollama，也支持 DeepSeek、OpenAI、通义千问、Kimi 及其他 OpenAI 兼容服务。
+
+> [!IMPORTANT]
+> Veralyt 当前处于早期公开版本。模型输出可能存在错误；重要业务决策应结合报告中的证据与原始数据复核。
+
+## 核心能力
+
+- **自然语言分析**：模型根据问题自主规划 SQL、补查数据并判断何时生成报告。
+- **证据可追溯**：比率、排名、比较和风险结论可以关联原始行或计算输入。
+- **复杂工作簿解析**：支持多工作表、多层合并表头和同一工作表中的多个数据区域。
+- **只读查询边界**：使用 SQL AST 校验、任务数据表作用域、超时、内存和返回行数限制。
+- **结构化报告**：报告章节由模型根据用户要求组织，页面、HTML 和 Excel 使用相同内容顺序。
+- **数据版本管理**：数据修订形成不可变版本，历史分析不会自动切换到新数据。
+- **持久化任务**：会话、查询、证据、报告和队列状态保存在本地，进程重启后可以恢复。
+- **多模型支持**：可在界面中切换本地模型或 OpenAI 兼容云端模型。
+
+## 工作流程
+
+```mermaid
+flowchart LR
+    A[上传 Excel / CSV] --> B[解析数据区域与 Schema]
+    B --> C[提出自然语言问题]
+    C --> D{意图识别}
+    D -->|普通问题| E[直接回答]
+    D -->|数据分析| F[模型规划只读 SQL]
+    F --> G[安全校验与执行]
+    G --> H{结果是否充分}
+    H -->|需要补查| F
+    H -->|可以交付| I[生成结构化报告]
+    I --> J[模型终审]
+    J --> K[页面 / HTML / Excel]
+```
+
+详细的模块边界和设计原则见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+
+## 环境要求
+
+- Python 3.13+
+- [uv](https://docs.astral.sh/uv/)
+- Node.js 20+
+- npm 10+
+- 本地推理需要 [Ollama](https://ollama.com/) 和可用模型；使用云端模型时不要求 Ollama
+
+默认模型为 `qwen3.5:4b`。低显存设备可以在 `.env` 中降低上下文容量。
+
+## 快速开始
+
+### Windows 一键启动
 
 ```powershell
-cd D:\数据分析智能体\analyse_agent
+git clone https://github.com/3072074133-rgb/veralyt.git
+cd veralyt
+copy .env.example .env
 .\start.ps1
 ```
 
-脚本会检查 Ollama 和 `qwen3.5:4b`，同步 Python 依赖，在前端源码更新后自动重新构建，并在服务就绪后打开 `http://127.0.0.1:8000`。运行窗口需要保持开启，按 `Ctrl+C` 停止服务。
+也可以双击 `start.cmd`。脚本会同步依赖、检查前端构建并打开 `http://127.0.0.1:8000`。
 
-可选参数：
+常用参数：
 
 ```powershell
-.\start.ps1 -NoBrowser       # 不自动打开浏览器
-.\start.ps1 -Port 8001       # 改用其他端口
-.\start.ps1 -SkipBuild       # 已确认 dist 最新时跳过前端检查
+.\start.ps1 -NoBrowser
+.\start.ps1 -Port 8001
+.\start.ps1 -SkipBuild
 ```
 
-开发模式可分别运行：
+### 手动启动（Windows、Linux、macOS）
 
-```powershell
+安装后端和前端依赖：
+
+```bash
+git clone https://github.com/3072074133-rgb/veralyt.git
+cd veralyt
+cp .env.example .env
+uv sync --dev
+cd web
+npm ci
+cd ..
+```
+
+分别启动两个开发服务：
+
+```bash
 uv run uvicorn main:app --reload --host 127.0.0.1 --port 8000
+```
+
+```bash
 cd web
 npm run dev
 ```
 
-## 环境配置
+前端开发地址为 `http://127.0.0.1:5173`，API 地址为 `http://127.0.0.1:8000`。
 
-所有配置项均可用 `ANALYSE_AGENT_` 前缀覆盖，例如：
+## 模型配置
 
-```powershell
-$env:ANALYSE_AGENT_OLLAMA_MODEL = "qwen3.5:4b"
-$env:ANALYSE_AGENT_OLLAMA_HOST = "http://127.0.0.1:11434"
+启动后可以在“模型设置”中配置供应商、模型名称、Base URL、API Key、温度和最大输出长度。配置保存在本机 `data/model-settings.json`，API 只返回密钥掩码。
+
+也可以复制 `.env.example` 为 `.env` 后编辑。为兼容早期版本，环境变量继续使用 `ANALYSE_AGENT_` 前缀：
+
+```env
+ANALYSE_AGENT_OLLAMA_HOST=http://127.0.0.1:11434
+ANALYSE_AGENT_OLLAMA_MODEL=qwen3.5:4b
 ```
 
-启动系统后可从左侧“模型设置”打开运行时配置入口。支持 Ollama、DeepSeek、OpenAI、通义千问、Kimi，以及任意实现 OpenAI 兼容 `/chat/completions` 接口的自定义服务。可以配置供应商、模型名称、Base URL、API Key、温度和最大输出，并在保存前测试连接。本地 Ollama 模型还可以配置上下文窗口；云端模型不提供该配置，也不会收到本地上下文参数。系统通过内置模型表取得云端容量，在预计使用达到 80% 时整理历史会话，并在各模型请求发送前按该容量预留输出空间；未知模型统一按 200K 计算。供应商明确返回上下文超限时，系统会将其作为容量错误交给对应的分段或压缩流程，不会用同一份超大请求重复重试。保存后的配置写入本机 `data/model-settings.json`，下一次模型调用立即生效；设置 API 只返回密钥掩码，空值或掩码不会覆盖已有密钥。
+任务、文件、证据和报告默认保存在 `data/`。该目录、`.env`、日志和上传文件均已被 Git 忽略。
 
-模型请求默认使用 32768 tokens（含意图识别节点）；长会话由模型摘要，完整输入放不下时最多提升到 49152 tokens，不会静默替换为删减后的数据表或证据目录。输出预留与容量校验继续生效。可参考 `.env.example` 覆盖这些参数。此前记录的 16K 默认及意图识别 4K 限制已取消。
+## 使用方式
 
-当前 RTX 4060 Laptop 8GB 环境实测 `qwen3.5:4b` 的 16K 和 32K 上下文均可完整加载，Ollama 分别报告约 6.4GB 和 7.1GB。32K 仅在完整节点输入超过 16K 时启用；低显存设备应保持单路并发，并可通过环境变量调低两个上下文参数。
+1. 点击“新建分析”并上传 `.xlsx` 或 `.csv` 文件。
+2. 在数据工作区确认字段、单位和数据范围。
+3. 输入分析目标，例如“分析收入、利润和经营现金流的变化，并给出行动建议”。
+4. 检查报告中的证据入口和风险说明。
+5. 将正式结果发布到报告库，或导出 HTML、Excel。
 
-`start.ps1` 在需要自行启动本地 Ollama 时，会默认启用 Flash Attention、`q8_0` KV cache 和单路并发，降低长上下文的显存占用。如果 Ollama 已由桌面程序或其他服务启动，这三个服务端参数应在该 Ollama 进程的环境中配置并重启后才会生效。
+修改数据会创建新的数据版本，并使旧的活动结果失效。修改报告会保留旧版本，再生成新的结构化结果。
 
-任务、文件、证据和报告持久化保存在 `data` 目录；空任务不会出现在历史任务列表中。数据库启动时执行带编号的幂等迁移，并在首次升级前创建 SQLite 在线备份。
+## 数据与隐私
 
-任务只会在实际选择上传文件后创建。上传新数据会增加任务的数据版本，并立即作废旧的活动结果和旧证据导出。批量上传会逐文件返回成功或失败；全批失败时保留任务原状态。
+- 本地 Ollama 模式下，表格和提示词不需要发送给第三方模型服务。
+- 使用云端模型时，生成请求所需的数据上下文会发送给所配置的服务商。
+- 系统不持久化模型思考过程、节点输入输出或完整提示词快照。
+- 运行日志不记录原始单元格、知识正文或完整提示词。
+- 删除数据集、任务或报告属于永久删除，界面会在执行前明确提示。
 
-分析进行中可以在工作台点击“中止分析”。系统会在当前模型调用或工作流节点结束后安全停止本次运行，保留已有正式结果；没有历史结果的任务会标记为“已中止”，可直接重新提问。
-
-XLSX 解析采用只读流式扫描，只在内存中保留非空单元格。系统会在每个数据区域的前 100 个候选行内识别表头，支持最多三层合并表头，并按连续空行或空列将同一工作表拆为多个独立数据区域。每个数据集会记录来源工作表、单元格范围、表头行和数据行范围。区域识别阈值可通过 `ANALYSE_AGENT_HEADER_SEARCH_ROWS`、`ANALYSE_AGENT_REGION_BLANK_ROW_GAP` 和 `ANALYSE_AGENT_REGION_BLANK_COLUMN_GAP` 调整。
-
-较长会话会在本机通过同一个 `qwen3.5:4b` 模型增量整理为结构化长期记忆。原始消息始终完整保存在 SQLite；分析时组合长期记忆与近期原文，并校验摘要中的证据编号。上下文预算可通过 `ANALYSE_AGENT_MODEL_CONTEXT_TOKENS` 等对应配置覆盖。
-
-分析运行会保留任务状态、错误、工具结果、证据和最终报告，不保存工作流节点输入输出或提示词快照。最终结果按“事实、分析结论、交付状态”三层组织；每条比率、排名、比较和风险结论都绑定原始证据或计算输入。失败时可直接根据错误提示重试，已完成的报告和证据不会被覆盖。
-
-规划模型会看到全部物理表的真实 Schema、来源区域和最多 5 行首尾代表性样例，并直接生成只读 DuckDB SQL。单表、跨工作表 JOIN、UNION 和预聚合使用同一条通用执行路径，不再依赖固定报表名、固定字段名或专项查询工具。后端只校验只读安全、任务表作用域、超时、内存和返回行数，不改写 SQL，也不复判模型选择的业务口径。每次查询后，模型结合原始结果、空值和截断信息决定继续查询、重新规划、写报告或询问用户。
-
-任务页的“数据工作区”提供分页预览、字段画像、单元格纠错、小批量增删行以及字段语义和单位维护。修改通过乐观锁发布为不可变数据版本，不覆盖旧 Parquet；旧分析结果会立即失效。标量查询会确定性转换为 KPI，相关关系请求支持最多 200 个稳定抽样点的散点图。
-
-侧栏“数据集”保存可复用的数据资产及完整修订历史，可从任意指定版本创建新的分析任务，任务不会自动跟随最新版。“报告库”保存正式报告及版本指纹。两个库均提供永久删除，不提供归档或恢复；删除会移除全部版本和对应文件。数据集仍被任务引用时需先删除相关任务，任务仍关联报告时需先删除报告。
-
-分析执行过程会持久化 `query`、`table`、`chart`、`validation` 和 `error` 五类附件，并通过现有 SSE 事件流增量展示。普通建议、解释和闲聊由意图模型直接回答；报表分析的工具、数据集、查询、结论、图表和交付决定均由模型选择，后端只执行模型计划并维护技术安全边界。正式报告通过持久化作业队列生成，进程重启后会自动恢复中断作业。
+请勿使用未经授权的数据测试云端模型。提交 Issue 时不要附带真实报表、数据库、日志或访问凭据。
 
 ## 验证
 
-```powershell
-.\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\ruff.exe check app tests
-.\.venv\Scripts\python.exe -m pytest --cov=app --cov-report=term-missing -q
+后端：
+
+```bash
+uv sync --dev
+uv run pytest -q
+uv run ruff check app tests
+uv run pytest --cov=app --cov-report=term-missing -q
+```
+
+前端：
+
+```bash
 cd web
+npm ci
 npm test
+npm run typecheck
 npm run build
 npm run test:e2e
 ```
 
-日常测试默认跳过真实模型回归。需要验证当前 Ollama 模型、提示词和结构化输出时运行：
+日常测试默认跳过真实模型回归。已安装本地 Ollama 和指定模型后，可运行：
 
-```powershell
-.\.venv\Scripts\python.exe -m pytest -m ollama --run-ollama -q
+```bash
+uv run pytest -m ollama --run-ollama -q
 ```
 
-## 核心工作流
-
-详细模块边界见 [ARCHITECTURE.md](ARCHITECTURE.md)。
-
-项目采用混合工作流。意图识别后，只有明确要求查询、统计、比较或计算上传报表的请求才进入严格分析路径；建议、解释、原因和日常对话由模型直接回答。
+## 项目结构
 
 ```text
-用户问题
-  ├─ 普通问题 → 直接回答 → 结束
-  └─ 报表分析 → 准备上下文 → 规划 → 执行查询
-                         → 模型检查查询结果并决定补查或写作
-                         → 生成报告和分析结论 → 模型终审 → 完成
+veralyt/
+├── app/                  # FastAPI、工作流、数据、报告与导出服务
+├── prompts/              # 模型提示词与结构化输出约定
+├── scripts/              # OpenAPI 和维护脚本
+├── tests/                # 后端、工作流和真实模型回归测试
+├── web/                  # Vue 3 前端及 Playwright 测试
+├── ARCHITECTURE.md       # 架构边界
+├── CONTRIBUTING.md       # 贡献指南
+└── SECURITY.md           # 安全问题报告方式
 ```
 
-报告修改会同时携带旧报告及其引用证据；模型可以复用旧证据、补查或重新分析。最终审核模型选择通过、重新规划、重写或询问用户。模型选择通过时后端不再进行正确性复判。节点输入、输出、提示词和模型思考过程不会持久化。
+## 当前限制
 
-## 开源开发
+- 默认启动脚本主要针对 Windows；其他平台请使用手动启动方式。
+- 当前输入格式为 Excel 和 CSV，尚未提供远程数据库连接器。
+- 模型分析质量取决于数据质量、问题描述、模型能力和可用上下文。
+- 真实模型回归需要单独准备 Ollama 服务，不在公共 CI 中运行。
 
-核心运行只依赖本地 Ollama、SQLite 和上传的数据文件。长期记忆、报告发布和 Excel 导出属于可选能力，不影响最小分析路径。提交代码前运行：
+## 路线图
 
-```powershell
-uv sync --dev
-\.venv\Scripts\python.exe -m pytest -q
-\.venv\Scripts\ruff.exe check app tests
-cd web
-npm install
-npm test -- --run
-npm run typecheck
-npm run build
-```
+- 提供 Linux/macOS 一键启动脚本和容器化部署
+- 增加数据库连接器和更多文件格式
+- 增加英文界面与英文文档
+- 增加可复用的分析模板和评测数据集
+- 完善性能基准与模型质量评测
 
-默认配置见 [.env.example](.env.example)。不要提交 `.env`、`data/`、模型输出、用户上传文件或本地运行日志。
+## 参与贡献
 
-运行日志写入 `data/logs/app.jsonl` 并自动轮转。日志包含请求、任务、运行、节点和耗时标识，
-不记录原始单元格、知识正文或完整提示词。
+欢迎提交 Issue 和 Pull Request。开始开发前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 和 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。安全问题请按照 [SECURITY.md](SECURITY.md) 私下报告。
 
-Playwright 使用 `8011` 端口和系统临时目录中的独立数据目录，不会写入日常使用的 `data`。
+## 许可证
+
+Veralyt 使用 [MIT License](LICENSE)。

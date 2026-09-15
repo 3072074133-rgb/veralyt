@@ -1,5 +1,5 @@
 [project]
-name = "analyse-agent"
+name = "veralyt"
 version = "0.1.0"
 description = "Local-first spreadsheet analysis agent for finance teams"
 requires-python = ">=3.13"

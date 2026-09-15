@@ -1,5 +1,5 @@
 {
-  "name": "analyse-agent-web",
+  "name": "veralyt-web",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -7,7 +7,7 @@
     "dev": "vite",
     "typecheck": "npm run api:generate && vue-tsc --noEmit -p tsconfig.app.json",
     "build": "npm run api:generate && vue-tsc --noEmit -p tsconfig.app.json && vite build",
-    "api:schema": "..\\.venv\\Scripts\\python.exe ..\\scripts\\export_openapi.py",
+    "api:schema": "uv run --project .. python ../scripts/export_openapi.py",
     "api:generate": "npm run api:schema && openapi-typescript openapi.json -o src/generated/api-schema.ts",
     "test": "vitest run",
     "test:e2e": "playwright test"

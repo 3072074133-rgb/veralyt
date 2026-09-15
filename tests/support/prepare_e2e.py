@@ -26,7 +26,9 @@ def main() -> None:
     upload_dir = task_dir(task_id) / "uploads"
     upload_dir.mkdir(exist_ok=True)
     csv_path = upload_dir / "e2e-finance.csv"
-    csv_path.write_text("月份,收入\n2026-01,100\n2026-02,120\n2026-03,90\n", encoding="utf-8")
+    # Include a UTF-8 BOM so encoding detection is deterministic when this
+    # helper is spawned by Node.js under different Windows code pages.
+    csv_path.write_text("月份,收入\n2026-01,100\n2026-02,120\n2026-03,90\n", encoding="utf-8-sig")
     file_record = UploadedFile(
         id="e2e-finance-file",
         original_name="e2e-finance.csv",
@@ -71,6 +73,7 @@ def main() -> None:
             series=[ChartSeries(name="收入", field="收入")],
         )],
     )
+    repository.finish_execution(run_id, "completed", result=draft, activate=True)
     repository.add_artifact(
         task_id,
         run_id,

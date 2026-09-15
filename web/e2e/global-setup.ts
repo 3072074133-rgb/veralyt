@@ -7,7 +7,13 @@ export default async function globalSetup() {
   const result = spawnSync(python, ['tests/support/prepare_e2e.py'], {
     cwd: projectRoot,
     encoding: 'utf8',
-    env: { ...process.env, PYTHONPATH: projectRoot },
+    env: {
+      ...process.env,
+      PYTHONPATH: projectRoot,
+      PYTHONIOENCODING: 'utf-8',
+      PYTHONUTF8: '1',
+      ANALYSE_AGENT_MAX_SHEETS: '20',
+    },
   })
   if (result.status !== 0) {
     throw new Error(`E2E fixture setup failed: ${result.stderr || result.stdout}`)

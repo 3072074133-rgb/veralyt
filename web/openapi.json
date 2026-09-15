@@ -1,7 +1,7 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "数据分析智能体",
+    "title": "Veralyt",
     "version": "0.1.0"
   },
   "paths": {

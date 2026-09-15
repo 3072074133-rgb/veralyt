@@ -80,7 +80,7 @@ function Get-AgentProcesses {
 function Stop-StaleAgentProcesses {
     $staleProcesses = @(Get-AgentProcesses)
     foreach ($process in $staleProcesses) {
-        Write-Host "Stopping previous Analyse Agent instance PID $($process.ProcessId)..." -ForegroundColor Yellow
+        Write-Host "Stopping previous Veralyt instance PID $($process.ProcessId)..." -ForegroundColor Yellow
         # Another stale worker may have exited between enumeration and stop.
         Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
     }
@@ -103,7 +103,7 @@ if (Test-TcpPort -TargetPort $Port) {
         $healthOk = $false
     }
     if ($healthOk) {
-        throw "Port $Port is still occupied by an Analyse Agent process that could not be stopped."
+        throw "Port $Port is still occupied by a Veralyt process that could not be stopped."
     }
     throw "Port $Port is used by another program. Close it or run: .\start.ps1 -Port 8001"
 }
@@ -253,7 +253,7 @@ if (-not $NoBrowser) {
     } -ArgumentList $Url | Out-Null
 }
 
-Write-Host "Starting Analyse Agent at $Url" -ForegroundColor Green
+Write-Host "Starting Veralyt at $Url" -ForegroundColor Green
 Write-Host "Press Ctrl+C to stop the service." -ForegroundColor DarkGray
 & $PythonPath -m uvicorn main:app --host 127.0.0.1 --port $Port
 exit $LASTEXITCODE

@@ -29,8 +29,10 @@ export default defineConfig({
       ...process.env,
       ANALYSE_AGENT_PORT: String(port),
       ANALYSE_AGENT_DATA_DIR: dataDir,
+      ANALYSE_AGENT_MAX_SHEETS: '20',
     },
   },
 })
 
 process.env.ANALYSE_AGENT_DATA_DIR = dataDir
+process.env.ANALYSE_AGENT_MAX_SHEETS = '20'

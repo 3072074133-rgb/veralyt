@@ -1,0 +1,37 @@
+name: Bug report
+description: 报告可以稳定复现的问题
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: 请勿上传真实报表、访问凭据或其他敏感信息。安全问题请使用 Security 页面私下报告。
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 实际发生了什么？预期行为是什么？
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      placeholder: "1. 启动…\n2. 上传合成测试文件…\n3. 输入…"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版本或提交
+      placeholder: v0.1.0 或 commit hash
+  - type: textarea
+    id: environment
+    attributes:
+      label: 环境
+      description: 操作系统、Python、Node.js、模型供应商与模型名称。
+  - type: textarea
+    id: logs
+    attributes:
+      label: 已脱敏日志
+      render: shell

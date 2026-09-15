@@ -39,14 +39,13 @@ test('sends the first message without uploading a file', async ({ page }) => {
   await expect(page.locator('.empty-state')).toHaveCount(0)
 })
 
-test('workbench and history fit the desktop viewport', async ({ page }, testInfo) => {
+test('workbench and libraries fit the desktop viewport', async ({ page }, testInfo) => {
   await page.goto('/')
   await expect(page.getByRole('heading', { name: '把表格交给我，直接说你想分析什么' })).toBeVisible()
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
   await page.screenshot({ path: testInfo.outputPath('workbench.png'), fullPage: true })
 
-  await page.goto('/history')
-  await expect(page.getByRole('heading', { name: '历史分析任务', exact: true })).toBeVisible()
+  await expect(page.getByRole('region', { name: '历史会话', exact: true })).toBeVisible()
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
   await page.screenshot({ path: testInfo.outputPath('history.png'), fullPage: true })
 
@@ -79,17 +78,17 @@ test('selecting a file lazily creates a task and imports it', async ({ page }, t
   await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight))
   await expect(page.getByRole('button', { name: /数据来源/ })).toBeVisible()
   const taskUrl = page.url()
-  await page.getByRole('link', { name: '历史任务' }).click()
-  await expect(page.getByRole('heading', { name: '历史分析任务', exact: true })).toBeVisible()
+  const history = page.getByRole('region', { name: '历史会话' })
+  const taskHistoryLink = history.locator(`a[href="${new URL(taskUrl).pathname}"]`)
+  await expect(taskHistoryLink).toBeVisible()
   await page.getByRole('link', { name: '当前分析' }).click()
   await expect(page).toHaveURL(taskUrl)
   await expect(page.getByRole('button', { name: /数据来源/ })).toBeVisible()
 
-  await page.getByRole('button', { name: '新建分析' }).click()
+  await page.getByRole('button', { name: '新建分析', exact: true }).click()
   await expect(page.getByRole('heading', { name: '把表格交给我，直接说你想分析什么' })).toBeVisible()
-  await page.getByRole('link', { name: '历史任务' }).click()
-  await page.getByRole('link', { name: '当前分析' }).click()
-  await expect(page.getByRole('heading', { name: '把表格交给我，直接说你想分析什么' })).toBeVisible()
+  await taskHistoryLink.click()
+  await expect(page).toHaveURL(taskUrl)
 
   await page.goto(taskUrl)
   await page.getByRole('button', { name: /数据来源/ }).click()
@@ -103,8 +102,7 @@ test('selecting a file lazily creates a task and imports it', async ({ page }, t
   await expect.poll(() => page.locator('.dataset-workspace').evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true)
   await page.screenshot({ path: testInfo.outputPath('dataset-workspace.png'), fullPage: true })
   await page.getByRole('button', { name: '关闭' }).click()
-  await page.goto('/history')
-  await expect(page.getByText('finance.csv', { exact: true }).first()).toBeVisible()
+  await expect(taskHistoryLink).toContainText('finance.csv')
 })
 
 test('completed analysis renders interactive charts', async ({ page }, testInfo) => {
