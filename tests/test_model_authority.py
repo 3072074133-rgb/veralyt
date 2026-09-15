@@ -1,4 +1,9 @@
+from pathlib import Path
+
+import pytest
+
 from app.evidence_validation import current_evidence_ids
+from app.repository import Repository
 from app.models import (
     AnalysisDraft, AnalysisState, ConvergenceDecision, ReflectionDecision,
     ValidationIssue, ValidationReport,
@@ -71,7 +76,10 @@ def test_final_review_reassesses_current_draft_without_stale_review() -> None:
     assert "decision_history" not in context
 
 
-def test_final_review_uses_summary_query_results_without_raw_rows() -> None:
+def test_final_review_uses_summary_query_results_without_raw_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repository = Repository(tmp_path / "test.db")
+    repository.initialize()
+    monkeypatch.setattr("app.workflow.repository", repository)
     state = AnalysisState(
         task_id="task", run_id="run", user_question="修改报告",
         tool_results=[{
