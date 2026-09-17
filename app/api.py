@@ -487,7 +487,8 @@ async def publish_report(task_id: str) -> ReportJob:
         job = repository.queue_report(task_id, snapshot.active_run_id or "")
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
-    await worker.enqueue_report(job.id)
+    if job.status in {"queued", "generating"}:
+        await worker.enqueue_report(job.id)
     return job
 
 

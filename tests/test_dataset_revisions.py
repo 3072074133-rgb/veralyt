@@ -348,6 +348,10 @@ def test_artifacts_and_persisted_report(tmp_path: Path) -> None:
             report = client.get(f"/api/v1/reports/{job['report_id']}").json()
             assert report["latest_version"] == 1
             assert report["versions"][0]["content"]["provenance"]["run_id"] == run_id
+            duplicate = client.post(f"/api/v1/tasks/{task_id}/reports")
+            assert duplicate.status_code == 202, duplicate.text
+            assert duplicate.json()["id"] == job["id"]
+            assert client.get(f"/api/v1/reports/{report['id']}").json()["latest_version"] == 1
             assert Path(report["versions"][0]["html_path"]).is_file()
             assert client.get("/api/v1/reports").json()[0]["id"] == report["id"]
             assert client.delete(f"/api/v1/tasks/{task_id}").status_code == 409

@@ -302,7 +302,9 @@
 .revision-row { min-height: 42px; border-bottom: 1px solid var(--border); display: grid; grid-template-columns: 54px minmax(180px, 1fr) 90px 110px 165px 76px; align-items: center; gap: 12px; font-size: 11px; }
 .revision-row .button { min-height: 28px; padding: 0 8px; font-size: 11px; }
 .revision-row:last-child { border-bottom: 0; }
-.report-version { grid-template-columns: 70px 150px 120px minmax(110px, 1fr) auto; }
+.report-version { grid-template-columns: 100px 150px 120px minmax(90px, 1fr) auto; }
+.version-cell strong, .version-cell small { display: block; }
+.version-cell small { margin-top: 2px; color: var(--muted); font-size: 9px; white-space: nowrap; }
 .report-table .open-report { min-width: 118px; white-space: nowrap; flex: 1 1 auto; }
 .report-table .row-actions { justify-content: flex-end; }
 .revision-actions { display: flex; justify-content: flex-end; gap: 7px; flex-wrap: wrap; }

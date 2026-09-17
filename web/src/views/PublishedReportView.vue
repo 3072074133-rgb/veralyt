@@ -8,7 +8,7 @@ import type { ReportDetail } from '../types'
 const route = useRoute(); const router = useRouter(); const report = ref<ReportDetail>(); const error = ref('')
 const version = computed(() => report.value?.versions.find(item => item.id === route.params.versionId) ?? report.value?.versions[0])
 onMounted(async () => { try { report.value = await api.getReport(route.params.id as string) } catch (reason) { error.value = reason instanceof Error ? reason.message : '报告加载失败' } })
-function versionLabel(item: ReportDetail['versions'][number]) { return item.content.analysis.report_schema_version === 2 ? `报告结构 v2 · 发布版本 ${item.version_number}` : `报告版本 v${item.version_number}` }
+function versionLabel(item: ReportDetail['versions'][number]) { return `发布版本 v${item.version_number}${item.content.analysis.report_schema_version === 2 ? ' · 结构协议 v2' : ''}` }
 </script>
 <template>
   <main class="workspace published-report">

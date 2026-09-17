@@ -38,8 +38,9 @@ async function remove(item: ReportSummary) {
 }
 function download(reportId: string, versionId: string) { window.location.href = `/api/v1/reports/${reportId}/versions/${versionId}/download` }
 function openVersion(reportId: string, versionId: string) { window.location.href = `/reports/${reportId}/versions/${versionId}` }
+function versionLabel(version: ReportDetail['versions'][number]) { return `v${version.version_number}` }
 function schemaLabel(version: ReportDetail['versions'][number]) {
-  return version.content.analysis.report_schema_version === 2 ? 'v2' : `v${version.version_number}`
+  return version.content.analysis.report_schema_version === 2 ? '结构协议 v2' : '历史结构'
 }
 function formatTime(value: string) { return new Date(value).toLocaleString('zh-CN', {hour12: false}) }
 </script>
@@ -51,8 +52,8 @@ function formatTime(value: string) { return new Date(value).toLocaleString('zh-C
       <div v-if="items.length" class="asset-table report-table">
         <div class="asset-row asset-head"><span>报告</span><span>最新版本</span><span>状态</span><span>更新时间</span><span></span></div>
         <template v-for="item in items" :key="item.id">
-          <div class="asset-row"><button class="asset-name" @click="toggle(item)"><component :is="expanded === item.id ? ChevronDown : ChevronRight" :size="16" /><FileText :size="16" /><span><strong>{{ item.title }}</strong><small>{{ item.id.slice(0, 8) }}</small></span></button><strong>{{ details[item.id]?.versions[0] ? schemaLabel(details[item.id].versions[0]) : '加载中…' }}</strong><span class="status-pill completed">已发布</span><span>{{ formatTime(item.updated_at) }}</span><div class="row-actions"><button class="icon-button" title="删除报告" aria-label="删除报告" @click="remove(item)"><Trash2 :size="16" /></button><button class="button open-report" :disabled="!details[item.id]?.versions[0]" @click="details[item.id]?.versions[0] && openVersion(item.id, details[item.id].versions[0].id)"><FileText :size="15" />打开报告</button></div></div>
-          <div v-if="expanded === item.id" class="revision-list"><div v-for="version in details[item.id]?.versions" :key="version.id" class="revision-row report-version"><strong>{{ schemaLabel(version) }}</strong><span>{{ formatTime(version.created_at) }}</span><span>数据版本 {{ version.content.provenance.data_revision }}</span><code>{{ version.content_hash.slice(0, 12) }}</code><div class="revision-actions"><button class="button" @click="openVersion(item.id, version.id)"><FileText :size="15" />查看</button><button class="button" @click="download(item.id, version.id)"><Download :size="15" />下载</button></div></div></div>
+          <div class="asset-row"><button class="asset-name" @click="toggle(item)"><component :is="expanded === item.id ? ChevronDown : ChevronRight" :size="16" /><FileText :size="16" /><span><strong>{{ item.title }}</strong><small>{{ item.id.slice(0, 8) }}</small></span></button><strong>{{ details[item.id]?.versions[0] ? versionLabel(details[item.id].versions[0]) : '加载中…' }}</strong><span class="status-pill completed">已发布</span><span>{{ formatTime(item.updated_at) }}</span><div class="row-actions"><button class="icon-button" title="删除报告" aria-label="删除报告" @click="remove(item)"><Trash2 :size="16" /></button><button class="button open-report" :disabled="!details[item.id]?.versions[0]" @click="details[item.id]?.versions[0] && openVersion(item.id, details[item.id].versions[0].id)"><FileText :size="15" />打开报告</button></div></div>
+          <div v-if="expanded === item.id" class="revision-list"><div v-for="version in details[item.id]?.versions" :key="version.id" class="revision-row report-version"><span class="version-cell"><strong>{{ versionLabel(version) }}</strong><small>{{ schemaLabel(version) }}</small></span><span>{{ formatTime(version.created_at) }}</span><span>数据版本 {{ version.content.provenance.data_revision }}</span><code>{{ version.content_hash.slice(0, 12) }}</code><div class="revision-actions"><button class="button" @click="openVersion(item.id, version.id)"><FileText :size="15" />查看</button><button class="button" @click="download(item.id, version.id)"><Download :size="15" />下载</button></div></div></div>
         </template>
       </div>
       <div v-else-if="!loading" class="history-empty"><FileText :size="28" /><p>在分析结果页发布后，报告会保存在这里。</p></div>

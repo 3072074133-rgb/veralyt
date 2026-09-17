@@ -109,12 +109,14 @@ class ReportRepositoryMixin:
                 raise KeyError(run_id)
             if run["status"] not in {"completed", "completed_with_warnings"} or not run["result_json"]:
                 raise ValueError("只有已完成并通过验证的分析可以发布报告")
-            pending = connection.execute(
-                "SELECT * FROM report_jobs WHERE run_id=? AND status IN ('queued','generating')",
+            existing_job = connection.execute(
+                """SELECT * FROM report_jobs
+                WHERE run_id=? AND status IN ('queued','generating','ready')
+                ORDER BY created_at DESC LIMIT 1""",
                 (run_id,),
             ).fetchone()
-            if pending:
-                return self._report_job(pending)
+            if existing_job:
+                return self._report_job(existing_job)
             connection.execute(
                 """INSERT INTO report_jobs(
                 id,task_id,run_id,status,report_id,report_version_id,error,attempt_count,
